@@ -122,3 +122,91 @@ public sealed record RouteCandidate(
     GroupInfo Group,
     double EffectiveMultiplier,
     bool HasUserRateOverride);
+
+public enum RoutingMode
+{
+    Economy,
+    Balanced,
+    Speed
+}
+
+public enum WinFormsTheme
+{
+    System,
+    Light,
+    Dark
+}
+
+public sealed record BalancedRoutingPolicy
+{
+    public string Platform { get; init; } = "openai";
+    public RoutingMode Mode { get; init; } = RoutingMode.Economy;
+    public double MinimumSuccessRate6h { get; init; } = 0;
+    public TimeSpan MaximumStatusAge { get; init; } = TimeSpan.FromMinutes(15);
+
+    public double PriceWeight => Mode switch
+    {
+        RoutingMode.Economy => 0.95,
+        RoutingMode.Balanced => 0.80,
+        RoutingMode.Speed => 0.35,
+        _ => 0.95
+    };
+
+    public double LatencyWeight => 1 - PriceWeight;
+
+    public void Validate()
+    {
+        if (string.IsNullOrWhiteSpace(Platform))
+        {
+            throw new ArgumentException("Routing platform is required.", nameof(Platform));
+        }
+
+        if (!double.IsFinite(MinimumSuccessRate6h) || MinimumSuccessRate6h is < 0 or > 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(MinimumSuccessRate6h));
+        }
+
+        if (MaximumStatusAge <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(MaximumStatusAge));
+        }
+
+        if (!double.IsFinite(PriceWeight) || PriceWeight is <= 0 or >= 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(Mode));
+        }
+    }
+}
+
+public sealed record RouteEvaluation(
+    RouteCandidate? Recommended,
+    RouteCandidate? Baseline,
+    IReadOnlyList<RouteCandidate> EligibleCandidates,
+    IReadOnlyDictionary<long, double> CandidateScores,
+    double? MinimumMultiplier,
+    double PriceWeight,
+    double LatencyWeight);
+
+public enum RouteDecisionReason
+{
+    NoCandidate,
+    InitialRoute,
+    CurrentRouteInvalid,
+    AlreadyOptimal,
+    BetterPrice,
+    FasterForWeightedTradeoff
+}
+
+public sealed record RouteDecision(
+    RouteCandidate? Current,
+    RouteCandidate? Target,
+    bool ShouldSwitch,
+    RouteDecisionReason Reason,
+    double PricePremiumPercent,
+    double? LatencyImprovementPercent,
+    DateTimeOffset EvaluatedAt);
+
+public sealed record RouteState
+{
+    public long? CurrentGroupId { get; init; }
+}

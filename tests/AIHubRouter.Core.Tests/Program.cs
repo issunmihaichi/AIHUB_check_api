@@ -10,6 +10,8 @@ var tests = new (string Name, Action Body)[]
     ("User rate override", TestUserRateOverride),
     ("Availability threshold", TestAvailabilityThreshold),
     ("Stale status rejection", TestStaleStatusRejection),
+    ("Routing preferences default to Win32-compatible values", TestRoutingPreferenceDefaults),
+    ("Routing preferences roundtrip", TestRoutingPreferenceRoundtrip),
     ("Encrypted settings roundtrip", TestEncryptedSettingsRoundtrip),
     ("Usable access token is reused", TestUsableAccessTokenIsReused),
     ("Expired access token refreshes first", TestExpiredAccessTokenRefreshesFirst),
@@ -127,6 +129,46 @@ static void TestStaleStatusRejection()
 
     var result = RoutingEngine.SelectCheapest(providers, new[] { Group(1), Group(2) }, new Dictionary<long, double>(), Criteria(), now);
     Assert(result?.Group.Id == 2, "Stale provider status was not rejected.");
+}
+
+static void TestRoutingPreferenceDefaults()
+{
+    var settings = new PersistentAppSettings();
+    Assert(settings.RoutingMode == RoutingMode.Economy, "New installs must preserve lowest-price routing.");
+    Assert(settings.AccountCacheSeconds == 300, "Account cache default changed.");
+    Assert(settings.Theme == WinFormsTheme.System, "Theme must follow Windows by default.");
+}
+
+static void TestRoutingPreferenceRoundtrip()
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        return;
+    }
+
+    var directory = Path.Combine(Path.GetTempPath(), "AIHubRouter.Tests", Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new AppSettingsStore(directory);
+        store.Save(new PersistentAppSettings
+        {
+            RoutingMode = RoutingMode.Speed,
+            AccountCacheSeconds = 90,
+            Theme = WinFormsTheme.Dark
+        }, null);
+
+        var loaded = store.Load().Settings;
+        Assert(loaded.RoutingMode == RoutingMode.Speed, "Routing mode did not roundtrip.");
+        Assert(loaded.AccountCacheSeconds == 90, "Cache duration did not roundtrip.");
+        Assert(loaded.Theme == WinFormsTheme.Dark, "Theme did not roundtrip.");
+    }
+    finally
+    {
+        if (Directory.Exists(directory))
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
 }
 
 static void TestEncryptedSettingsRoundtrip()

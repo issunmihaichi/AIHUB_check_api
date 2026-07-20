@@ -10,11 +10,25 @@ public sealed class PersistentAppSettings
     public bool PersistCredentials { get; init; }
     public string BaseUrl { get; init; } = "https://aihub.top";
     public string Platform { get; init; } = "openai";
+    public RoutingMode RoutingMode { get; init; } = RoutingMode.Economy;
     public int MinimumSuccessPercent { get; init; }
     public int PollingIntervalSeconds { get; init; } = 60;
+    public int AccountCacheSeconds { get; init; } = 300;
     public bool SmoothRendering { get; init; } = true;
+    public WinFormsTheme Theme { get; init; } = WinFormsTheme.System;
     public bool KeySelectionInitialized { get; init; }
     public long[] SelectedKeyIds { get; init; } = [];
+
+    public BalancedRoutingPolicy CreatePolicy()
+    {
+        return new BalancedRoutingPolicy
+        {
+            Platform = string.IsNullOrWhiteSpace(Platform) ? "openai" : Platform,
+            Mode = RoutingMode,
+            MinimumSuccessRate6h = Math.Clamp(MinimumSuccessPercent, 0, 100) / 100d,
+            MaximumStatusAge = TimeSpan.FromMinutes(15)
+        };
+    }
 }
 
 public sealed class PersistentCredentials
