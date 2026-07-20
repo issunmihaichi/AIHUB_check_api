@@ -1,0 +1,20 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\AIHubRouter.Core\AIHubRouter.Core.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>AIHubRouter</AssemblyName>
+    <RootNamespace>AIHubRouter.WinForms</RootNamespace>
+    <Product>AIHub Lowest Price Router</Product>
+    <Description>Windows desktop router for AIHub provider groups.</Description>
+    <Version>1.0.0</Version>
+  </PropertyGroup>
+
+</Project>
