@@ -95,7 +95,10 @@ public sealed class AIHubClient : IDisposable
             "/api/v1/auth/refresh",
             new { refresh_token = refreshToken },
             cancellationToken);
-        return CreateSession(response);
+        var session = CreateSession(response);
+        return string.IsNullOrWhiteSpace(session.RefreshToken)
+            ? session with { RefreshToken = refreshToken }
+            : session;
     }
 
     public async Task<IReadOnlyList<GroupInfo>> GetAvailableGroupsAsync(CancellationToken cancellationToken = default)

@@ -16,8 +16,11 @@ var tests = new (string Name, Action Body)[]
     ("Rejected refresh falls back to login", TestRejectedRefreshFallsBackToLogin),
     ("Login endpoint maps session", TestLoginEndpointMapsSession),
     ("Refresh endpoint maps rotated session", TestRefreshEndpointMapsRotatedSession),
+    ("Refresh keeps token when server omits rotation", TestRefreshKeepsTokenWhenServerOmitsRotation),
     ("Interactive login requirement is rejected", TestInteractiveLoginRequirementIsRejected),
-    ("Empty key selection roundtrips", TestEmptyKeySelectionRoundtrips)
+    ("Empty key selection roundtrips", TestEmptyKeySelectionRoundtrips),
+    ("First key selection chooses first active key", TestFirstKeySelectionChoosesFirstActiveKey),
+    ("Initialized empty key selection stays empty", TestInitializedEmptyKeySelectionStaysEmpty)
 };
 
 var failures = 0;
@@ -352,6 +355,18 @@ static void TestRefreshEndpointMapsRotatedSession()
     Assert(session.ExpiresAt == now.AddSeconds(1800), "Refresh expiration was not converted to an absolute time.");
 }
 
+static void TestRefreshKeepsTokenWhenServerOmitsRotation()
+{
+    var handler = new StubHttpMessageHandler(request => JsonResponse("""
+        {"code":0,"message":"ok","data":{"access_token":"access-new","expires_in":1800,"token_type":"Bearer"}}
+        """));
+    using var client = new AIHubClient("https://example.test", messageHandler: handler);
+
+    var session = client.RefreshSessionAsync("refresh-current", CancellationToken.None).GetAwaiter().GetResult();
+
+    Assert(session.RefreshToken == "refresh-current", "Refresh discarded the existing token when no rotation was returned.");
+}
+
 static void TestInteractiveLoginRequirementIsRejected()
 {
     const string temporaryToken = "temporary-two-factor-token-must-not-leak";
@@ -403,6 +418,35 @@ static void TestEmptyKeySelectionRoundtrips()
             Directory.Delete(directory, recursive: true);
         }
     }
+}
+
+static void TestFirstKeySelectionChoosesFirstActiveKey()
+{
+    var selected = KeySelectionPolicy.Resolve(
+        initialized: false,
+        savedIds: [],
+        keys:
+        [
+            new ApiKeyInfo { Id = 10, Status = "disabled" },
+            new ApiKeyInfo { Id = 20, Status = "active" },
+            new ApiKeyInfo { Id = 30, Status = "active" }
+        ]);
+
+    Assert(selected.SequenceEqual(new long[] { 20 }), "First load did not select only the first active Key.");
+}
+
+static void TestInitializedEmptyKeySelectionStaysEmpty()
+{
+    var keys = new[]
+    {
+        new ApiKeyInfo { Id = 10, Status = "active" },
+        new ApiKeyInfo { Id = 20, Status = "active" }
+    };
+    var empty = KeySelectionPolicy.Resolve(initialized: true, savedIds: [], keys);
+    var restored = KeySelectionPolicy.Resolve(initialized: true, savedIds: [20, 999], keys);
+
+    Assert(empty.Count == 0, "An initialized empty selection selected a Key again.");
+    Assert(restored.SequenceEqual(new long[] { 20 }), "Saved selection did not ignore unavailable Key IDs.");
 }
 
 static HttpResponseMessage JsonResponse(string json)

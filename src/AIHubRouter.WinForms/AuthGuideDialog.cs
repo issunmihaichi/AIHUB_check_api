@@ -52,24 +52,24 @@ internal sealed class AuthGuideDialog : Form
             TextAlign = ContentAlignment.MiddleLeft
         }, 0, 0);
         root.Controls.Add(CreateTextStep(
-            "1  登录网页",
-            "点击下方“打开 AIHub 登录页”，在浏览器中完成登录。程序不会读取或保存你的账号密码。"), 0, 1);
+            "1  推荐：邮箱和密码自动登录",
+            "主窗口直接填写 AIHub 邮箱和密码。程序启动时复用 session；临近过期先刷新，refresh 失效后再重新登录。"), 0, 1);
         root.Controls.Add(CreateCommandStep(
-            "2  获取登录 Token（必填）",
-            "在 Console 中执行后会复制并显示 Token；若显示 null，请确认已经登录当前站点：",
+            "2  高级备用：获取登录 Token",
+            "不希望保存账号密码时，可网页登录后在 Console 执行；若显示 null，说明当前页面没有这个 localStorage 项：",
             TokenCommand,
             "复制 Token 命令"), 0, 2);
         root.Controls.Add(CreateCommandStep(
-            "3  获取浏览器 User-Agent（推荐）",
-            "执行后会复制并显示 UA。请先把 Token 粘贴进软件，再执行本条，避免覆盖剪贴板：",
+            "3  高级备用：获取浏览器 User-Agent",
+            "若服务端启用了会话 UA 绑定再填写。请先粘贴 Token，再执行本条，避免覆盖剪贴板：",
             UserAgentCommand,
             "复制 UA 命令"), 0, 3);
         root.Controls.Add(CreateTextStep(
-            "4  Cookie（可选）",
+            "4  高级备用：Cookie（可选）",
             "通常只填 Token 和 User-Agent 即可。需要 Cookie 时，可从浏览器开发者工具的 Network 请求头复制完整 Cookie。"), 0, 4);
         root.Controls.Add(new Label
         {
-            Text = "只执行 copy(...) 时 Console 显示 undefined 属于正常现象，内容已复制。返回主窗口粘贴后点击“验证认证”。",
+            Text = "勾选“常态化保存认证”后，邮箱、密码、access/refresh token、Cookie 和 UA 都由 Windows DPAPI 加密，仅当前 Windows 用户可解密。",
             Dock = DockStyle.Fill,
             ForeColor = Color.FromArgb(80, 90, 100),
             TextAlign = ContentAlignment.MiddleLeft

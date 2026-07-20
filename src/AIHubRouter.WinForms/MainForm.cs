@@ -14,6 +14,10 @@ internal sealed partial class MainForm : Form
     private readonly AppSettingsStore _settingsStore = new();
     private bool _busy;
     private bool _hasLoadedKeys;
+    private bool _keySelectionInitialized;
+    private bool _applyingKeys;
+    private HashSet<long> _savedSelectedKeyIds = [];
+    private AuthSession? _currentSession;
     private MonitorSummary? _summary;
     private IReadOnlyList<GroupInfo> _groups = [];
     private IReadOnlyDictionary<long, double> _userRates = new Dictionary<long, double>();
@@ -58,10 +62,15 @@ internal sealed partial class MainForm : Form
         _routeNowButton.Click += async (_, _) => await ExecuteRoutingCycleAsync();
         _autoRouteCheck.CheckedChanged += async (_, _) => await ToggleAutoRoutingAsync();
         _showCredentialsCheck.CheckedChanged += (_, _) => ToggleCredentialVisibility();
+        _advancedAuthenticationCheck.CheckedChanged += (_, _) => ToggleAdvancedAuthentication();
         _verticalSyncCheck.CheckedChanged += (_, _) => ApplySmoothRendering();
+        _emailText.TextChanged += (_, _) => _currentSession = null;
+        _passwordText.TextChanged += (_, _) => _currentSession = null;
+        _baseUrlText.TextChanged += (_, _) => _currentSession = null;
         _platformCombo.SelectedIndexChanged += (_, _) => RecalculateCandidate();
         _minimumSuccessInput.ValueChanged += (_, _) => RecalculateCandidate();
         _intervalInput.ValueChanged += (_, _) => UpdateTimerInterval();
+        _keyGrid.CellValueChanged += (_, eventArgs) => HandleKeySelectionChanged(eventArgs);
         _autoTimer.Tick += async (_, _) => await ExecuteRoutingCycleAsync();
         UpdateTimerInterval();
     }
@@ -76,11 +85,18 @@ internal sealed partial class MainForm : Form
         SetBusy(true, "正在验证认证...");
         try
         {
-            using var client = CreateClient();
-            var user = await client.ValidateLoginAsync(_shutdown.Token);
-            var identity = FindIdentity(user);
-            SetStatus(identity is null ? "认证有效。" : $"认证有效：{identity}", success: true);
-            await RefreshDataCoreAsync(client, loadAccountData: true, _shutdown.Token);
+            if (!HasCredentials())
+            {
+                throw new InvalidOperationException("请先输入邮箱和密码，或展开高级认证填写 Token/Cookie。");
+            }
+
+            await RunAuthenticatedAsync(async client =>
+            {
+                var user = await client.ValidateLoginAsync(_shutdown.Token);
+                var identity = FindIdentity(user);
+                SetStatus(identity is null ? "认证有效。" : $"认证有效：{identity}", success: true);
+                await RefreshDataCoreAsync(client, loadAccountData: true, _shutdown.Token);
+            });
         }
         catch (Exception exception)
         {
@@ -102,8 +118,16 @@ internal sealed partial class MainForm : Form
         SetBusy(true, "正在刷新监测数据...");
         try
         {
-            using var client = CreateClient();
-            await RefreshDataCoreAsync(client, loadAccountData, _shutdown.Token);
+            if (loadAccountData)
+            {
+                await RunAuthenticatedAsync(client =>
+                    RefreshDataCoreAsync(client, loadAccountData: true, _shutdown.Token));
+            }
+            else
+            {
+                using var client = CreateManualClient();
+                await RefreshDataCoreAsync(client, loadAccountData: false, _shutdown.Token);
+            }
             var detail = loadAccountData
                 ? $"已加载 {_summary?.Apis.Count ?? 0} 个监测项和 {_keyGrid.Rows.Count} 个 Key。"
                 : $"已加载 {_summary?.Apis.Count ?? 0} 个公开监测项。";
@@ -153,55 +177,10 @@ internal sealed partial class MainForm : Form
         {
             if (!HasCredentials())
             {
-                throw new InvalidOperationException("请先输入登录 Token 或 Cookie。站点当前通常需要 Bearer Token。");
+                throw new InvalidOperationException("请先输入邮箱和密码，或展开高级认证填写 Token/Cookie。");
             }
 
-            using var client = CreateClient();
-            await RefreshDataCoreAsync(client, loadAccountData: true, _shutdown.Token);
-
-            if (_bestCandidate is null)
-            {
-                throw new InvalidOperationException("当前没有同时满足价格、可用率、时效和账号权限的供应商分组。");
-            }
-
-            var selectedKeys = CurrentKeyRows().Where(row => row.Selected).ToList();
-            if (selectedKeys.Count == 0)
-            {
-                throw new InvalidOperationException("请在 API Keys 表格中至少勾选一个 Key。首次加载会默认勾选第一个启用的 Key。");
-            }
-
-            var changed = 0;
-            var failed = new List<string>();
-            foreach (var key in selectedKeys.Where(key => key.GroupId != _bestCandidate.Group.Id))
-            {
-                try
-                {
-                    await client.UpdateKeyGroupAsync(key.Id, _bestCandidate.Group.Id, _shutdown.Token);
-                    key.GroupId = _bestCandidate.Group.Id;
-                    key.GroupName = _bestCandidate.Group.Name;
-                    key.Platform = _bestCandidate.Group.Platform;
-                    changed++;
-                }
-                catch (Exception exception)
-                {
-                    failed.Add($"{key.Name}: {GetSafeErrorMessage(exception)}");
-                }
-            }
-
-            _keyGrid.Refresh();
-            var route = $"{_bestCandidate.Provider.PlanType} / 分组 {_bestCandidate.Group.Id} / {_bestCandidate.EffectiveMultiplier:0.####}x";
-            if (failed.Count > 0)
-            {
-                SetStatus($"已切换 {changed} 个 Key，失败 {failed.Count} 个。{string.Join("；", failed)}", success: false);
-            }
-            else if (changed == 0)
-            {
-                SetStatus($"所选 Key 已在最低价路由：{route}", success: true);
-            }
-            else
-            {
-                SetStatus($"已将 {changed} 个 Key 切换到 {route}", success: true);
-            }
+            await RunAuthenticatedAsync(ExecuteRoutingCoreAsync);
         }
         catch (Exception exception)
         {
@@ -210,6 +189,60 @@ internal sealed partial class MainForm : Form
         finally
         {
             SetBusy(false);
+        }
+    }
+
+    private async Task ExecuteRoutingCoreAsync(AIHubClient client)
+    {
+        await RefreshDataCoreAsync(client, loadAccountData: true, _shutdown.Token);
+
+        if (_bestCandidate is null)
+        {
+            throw new InvalidOperationException("当前没有同时满足价格、可用率、时效和账号权限的供应商分组。");
+        }
+
+        var selectedKeys = CurrentKeyRows().Where(row => row.Selected).ToList();
+        if (selectedKeys.Count == 0)
+        {
+            throw new InvalidOperationException("请在 API Keys 表格中至少勾选一个 Key。首次加载会默认勾选第一个启用的 Key。");
+        }
+
+        var changed = 0;
+        var failed = new List<string>();
+        foreach (var key in selectedKeys.Where(key => key.GroupId != _bestCandidate.Group.Id))
+        {
+            try
+            {
+                await client.UpdateKeyGroupAsync(key.Id, _bestCandidate.Group.Id, _shutdown.Token);
+                key.GroupId = _bestCandidate.Group.Id;
+                key.GroupName = _bestCandidate.Group.Name;
+                key.Platform = _bestCandidate.Group.Platform;
+                changed++;
+            }
+            catch (Exception exception)
+            {
+                if (exception is AIHubApiException { StatusCode: HttpStatusCode.Unauthorized })
+                {
+                    throw;
+                }
+
+                failed.Add($"{key.Name}: {GetSafeErrorMessage(exception)}");
+            }
+        }
+
+        _keyGrid.Refresh();
+        var route = $"{_bestCandidate.Provider.PlanType} / 分组 {_bestCandidate.Group.Id} / {_bestCandidate.EffectiveMultiplier:0.####}x";
+        if (failed.Count > 0)
+        {
+            SetStatus($"已切换 {changed} 个 Key，失败 {failed.Count} 个。{string.Join("；", failed)}", success: false);
+        }
+        else if (changed == 0)
+        {
+            SetStatus($"所选 Key 已在最低价路由：{route}", success: true);
+        }
+        else
+        {
+            SetStatus($"已将 {changed} 个 Key 切换到 {route}", success: true);
         }
     }
 
@@ -285,38 +318,45 @@ internal sealed partial class MainForm : Form
 
     private void ApplyKeys(IReadOnlyList<ApiKeyInfo> keys)
     {
-        var selectedIds = CurrentKeyRows()
-            .Where(row => row.Selected)
-            .Select(row => row.Id)
-            .ToHashSet();
+        var selectedIds = _hasLoadedKeys && _keySelectionInitialized
+            ? CurrentKeyRows().Where(row => row.Selected).Select(row => row.Id).ToHashSet()
+            : KeySelectionPolicy.Resolve(_keySelectionInitialized, _savedSelectedKeyIds, keys).ToHashSet();
         var groupLookup = _groups.ToDictionary(group => group.Id);
 
-        var rows = keys.Select(key =>
+        _applyingKeys = true;
+        try
         {
-            var group = key.Group ?? (key.GroupId is { } id && groupLookup.TryGetValue(id, out var found) ? found : null);
-            return new KeyGridRow
+            var rows = keys.Select(key =>
             {
-                Selected = selectedIds.Contains(key.Id),
-                Id = key.Id,
-                Name = key.Name,
-                Status = key.Status,
-                GroupId = key.GroupId,
-                GroupName = group?.Name ?? "未绑定",
-                Platform = group?.Platform ?? "-"
-            };
-        }).ToList();
+                var group = key.Group ?? (key.GroupId is { } id && groupLookup.TryGetValue(id, out var found) ? found : null);
+                return new KeyGridRow
+                {
+                    Selected = selectedIds.Contains(key.Id),
+                    Id = key.Id,
+                    Name = key.Name,
+                    Status = key.Status,
+                    GroupId = key.GroupId,
+                    GroupName = group?.Name ?? "未绑定",
+                    Platform = group?.Platform ?? "-"
+                };
+            }).ToList();
 
-        if (!_hasLoadedKeys && rows.All(row => !row.Selected))
-        {
-            var firstActive = rows.FirstOrDefault(row => row.Status.Equals("active", StringComparison.OrdinalIgnoreCase));
-            if (firstActive is not null)
+            _keyGrid.DataSource = new BindingList<KeyGridRow>(rows);
+            _hasLoadedKeys = true;
+            if (keys.Count > 0 || _keySelectionInitialized)
             {
-                firstActive.Selected = true;
+                CaptureKeySelection();
             }
         }
+        finally
+        {
+            _applyingKeys = false;
+        }
 
-        _hasLoadedKeys = true;
-        _keyGrid.DataSource = new BindingList<KeyGridRow>(rows);
+        if (_persistCredentialsCheck.Checked)
+        {
+            SaveCurrentSettings(showStatus: false);
+        }
     }
 
     private IEnumerable<KeyGridRow> CurrentKeyRows()
@@ -327,6 +367,29 @@ internal sealed partial class MainForm : Form
         }
 
         return [];
+    }
+
+    private void HandleKeySelectionChanged(DataGridViewCellEventArgs eventArgs)
+    {
+        if (_applyingKeys || eventArgs.RowIndex < 0 || eventArgs.ColumnIndex != 0)
+        {
+            return;
+        }
+
+        CaptureKeySelection();
+        if (_persistCredentialsCheck.Checked)
+        {
+            SaveCurrentSettings(showStatus: false);
+        }
+    }
+
+    private void CaptureKeySelection()
+    {
+        _savedSelectedKeyIds = CurrentKeyRows()
+            .Where(row => row.Selected)
+            .Select(row => row.Id)
+            .ToHashSet();
+        _keySelectionInitialized = true;
     }
 
     private async Task ToggleAutoRoutingAsync()
@@ -352,6 +415,7 @@ internal sealed partial class MainForm : Form
     private void ToggleCredentialVisibility()
     {
         var hidden = !_showCredentialsCheck.Checked;
+        _passwordText.UseSystemPasswordChar = hidden;
         _tokenText.UseSystemPasswordChar = hidden;
         _cookieText.UseSystemPasswordChar = hidden;
         _userAgentText.UseSystemPasswordChar = hidden;
@@ -434,12 +498,33 @@ internal sealed partial class MainForm : Form
             _intervalInput.Value = Math.Clamp(settings.PollingIntervalSeconds, 30, 3600);
             _verticalSyncCheck.Checked = settings.SmoothRendering;
             _persistCredentialsCheck.Checked = settings.PersistCredentials;
+            _keySelectionInitialized = settings.KeySelectionInitialized;
+            _savedSelectedKeyIds = settings.SelectedKeyIds.ToHashSet();
 
             if (settings.PersistCredentials && snapshot.Credentials is { } credentials)
             {
+                _emailText.Text = credentials.Email;
+                _passwordText.Text = credentials.Password;
                 _tokenText.Text = credentials.BearerToken;
                 _cookieText.Text = credentials.Cookie;
                 _userAgentText.Text = credentials.UserAgent;
+                if (!new LoginCredentials(credentials.Email, credentials.Password).IsComplete &&
+                    (!string.IsNullOrWhiteSpace(credentials.BearerToken) ||
+                        !string.IsNullOrWhiteSpace(credentials.Cookie) ||
+                        !string.IsNullOrWhiteSpace(credentials.UserAgent)))
+                {
+                    _advancedAuthenticationCheck.Checked = true;
+                    ToggleAdvancedAuthentication();
+                }
+
+                if (!string.IsNullOrWhiteSpace(credentials.BearerToken) ||
+                    !string.IsNullOrWhiteSpace(credentials.RefreshToken))
+                {
+                    _currentSession = new AuthSession(
+                        credentials.BearerToken,
+                        credentials.RefreshToken,
+                        credentials.AccessTokenExpiresAt ?? DateTimeOffset.MinValue);
+                }
             }
         }
         catch (Exception exception)
@@ -453,6 +538,11 @@ internal sealed partial class MainForm : Form
     {
         try
         {
+            if (_hasLoadedKeys)
+            {
+                CaptureKeySelection();
+            }
+
             var settings = new PersistentAppSettings
             {
                 PersistCredentials = _persistCredentialsCheck.Checked,
@@ -460,12 +550,18 @@ internal sealed partial class MainForm : Form
                 Platform = _platformCombo.SelectedItem?.ToString() ?? "openai",
                 MinimumSuccessPercent = (int)_minimumSuccessInput.Value,
                 PollingIntervalSeconds = (int)_intervalInput.Value,
-                SmoothRendering = _verticalSyncCheck.Checked
+                SmoothRendering = _verticalSyncCheck.Checked,
+                KeySelectionInitialized = _keySelectionInitialized,
+                SelectedKeyIds = _savedSelectedKeyIds.Order().ToArray()
             };
             var credentials = settings.PersistCredentials
                 ? new PersistentCredentials
                 {
-                    BearerToken = _tokenText.Text,
+                    Email = _emailText.Text.Trim(),
+                    Password = _passwordText.Text,
+                    BearerToken = _currentSession?.AccessToken ?? _tokenText.Text,
+                    RefreshToken = _currentSession?.RefreshToken ?? string.Empty,
+                    AccessTokenExpiresAt = _currentSession?.ExpiresAt,
                     Cookie = _cookieText.Text,
                     UserAgent = _userAgentText.Text
                 }
@@ -498,14 +594,14 @@ internal sealed partial class MainForm : Form
     {
         if (_persistCredentialsCheck.Checked)
         {
-            SetStatus("常态化保存已开启；点击“保存当前配置”立即加密保存。", success: true);
+            SaveCurrentSettings(showStatus: true);
             return;
         }
 
         SaveCurrentSettings(showStatus: true);
     }
 
-    private AIHubClient CreateClient()
+    private AIHubClient CreateManualClient()
     {
         return new AIHubClient(
             _baseUrlText.Text,
@@ -516,7 +612,94 @@ internal sealed partial class MainForm : Form
 
     private bool HasCredentials()
     {
-        return !string.IsNullOrWhiteSpace(_tokenText.Text) || !string.IsNullOrWhiteSpace(_cookieText.Text);
+        return HasAutomaticCredentials() ||
+            !string.IsNullOrWhiteSpace(_tokenText.Text) ||
+            !string.IsNullOrWhiteSpace(_cookieText.Text);
+    }
+
+    private bool HasAutomaticCredentials()
+    {
+        return !string.IsNullOrWhiteSpace(_emailText.Text) &&
+            !string.IsNullOrWhiteSpace(_passwordText.Text);
+    }
+
+    private async Task<AIHubClient> CreateAuthenticatedClientAsync(bool forceRenew)
+    {
+        var credentials = new LoginCredentials(_emailText.Text.Trim(), _passwordText.Text);
+        var canUseSessionCoordinator = credentials.IsComplete ||
+            !string.IsNullOrWhiteSpace(_currentSession?.RefreshToken);
+        if (!canUseSessionCoordinator)
+        {
+            return CreateManualClient();
+        }
+
+        if (forceRenew && _currentSession is not null)
+        {
+            _currentSession = _currentSession with { ExpiresAt = DateTimeOffset.MinValue };
+        }
+
+        using var sessionClient = new AIHubClient(
+            _baseUrlText.Text,
+            cookie: _cookieText.Text,
+            userAgent: _userAgentText.Text);
+        var coordinator = new SessionCoordinator(
+            sessionClient.RefreshSessionAsync,
+            sessionClient.LoginAsync,
+            PersistSessionAsync);
+        var session = await coordinator.GetSessionAsync(_currentSession, credentials, _shutdown.Token);
+        _currentSession = session;
+        _tokenText.Text = session.AccessToken;
+        return new AIHubClient(
+            _baseUrlText.Text,
+            session.AccessToken,
+            _cookieText.Text,
+            _userAgentText.Text);
+    }
+
+    private Task PersistSessionAsync(AuthSession session, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        _currentSession = session;
+        _tokenText.Text = session.AccessToken;
+        if (_persistCredentialsCheck.Checked && !SaveCurrentSettings(showStatus: false))
+        {
+            throw new InvalidOperationException("认证 session 已更新，但加密保存失败。");
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async Task RunAuthenticatedAsync(Func<AIHubClient, Task> operation)
+    {
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            using var client = await CreateAuthenticatedClientAsync(forceRenew: attempt > 0);
+            try
+            {
+                await operation(client);
+                return;
+            }
+            catch (AIHubApiException exception)
+                when (exception.StatusCode == HttpStatusCode.Unauthorized &&
+                    attempt == 0 &&
+                    CanRenewAutomatically())
+            {
+                InvalidateCurrentSession();
+            }
+        }
+    }
+
+    private bool CanRenewAutomatically()
+    {
+        return HasAutomaticCredentials() || !string.IsNullOrWhiteSpace(_currentSession?.RefreshToken);
+    }
+
+    private void InvalidateCurrentSession()
+    {
+        if (_currentSession is not null)
+        {
+            _currentSession = _currentSession with { ExpiresAt = DateTimeOffset.MinValue };
+        }
     }
 
     private void SetBusy(bool busy, string? message = null)

@@ -5,10 +5,14 @@ namespace AIHubRouter.WinForms;
 internal sealed partial class MainForm
 {
     private readonly TextBox _baseUrlText = new() { Text = "https://aihub.top", PlaceholderText = "AIHub 站点地址" };
-    private readonly TextBox _tokenText = new() { UseSystemPasswordChar = true, PlaceholderText = "必填：auth_token 或 Bearer Token" };
+    private readonly TextBox _emailText = new() { PlaceholderText = "AIHub 登录邮箱" };
+    private readonly TextBox _passwordText = new() { UseSystemPasswordChar = true, PlaceholderText = "AIHub 登录密码" };
+    private readonly TextBox _tokenText = new() { UseSystemPasswordChar = true, PlaceholderText = "备用：auth_token 或 Bearer Token" };
     private readonly TextBox _cookieText = new() { UseSystemPasswordChar = true, PlaceholderText = "可选：完整 Cookie 请求头" };
     private readonly TextBox _userAgentText = new() { UseSystemPasswordChar = true, PlaceholderText = "推荐：登录浏览器的 User-Agent" };
     private readonly CheckBox _showCredentialsCheck = new() { Text = "显示凭据", AutoSize = true };
+    private readonly CheckBox _advancedAuthenticationCheck = new() { Text = "展开高级认证（Token / Cookie / UA）", AutoSize = true };
+    private readonly TableLayoutPanel _advancedAuthenticationPanel = new();
     private readonly Button _authGuideButton = new() { Text = "认证向导", AutoSize = true, Width = 132 };
     private readonly Button _openLoginButton = new() { Text = "打开登录页", AutoSize = true, Width = 132 };
     private readonly Button _pasteTokenButton = new() { Text = "粘贴", AutoSize = true };
@@ -58,8 +62,8 @@ internal sealed partial class MainForm
         SuspendLayout();
         Text = "AIHub 最低价路由器";
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(1050, 820);
-        ClientSize = new Size(1220, 920);
+        MinimumSize = new Size(1050, 880);
+        ClientSize = new Size(1220, 950);
         Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
         BackColor = Color.FromArgb(245, 247, 249);
         DoubleBuffered = true;
@@ -76,7 +80,7 @@ internal sealed partial class MainForm
             RowCount = 3,
             BackColor = BackColor
         };
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 250));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 340));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
@@ -109,22 +113,23 @@ internal sealed partial class MainForm
         {
             Dock = DockStyle.Fill,
             ColumnCount = 4,
-            RowCount = 6
+            RowCount = 7
         };
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 158));
+        table.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         table.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
-        for (var row = 1; row < 5; row++)
-        {
-            table.RowStyles.Add(new RowStyle(SizeType.Percent, 25));
-        }
-        table.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
+        table.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+        table.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
+        table.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        table.RowStyles.Add(new RowStyle(SizeType.Absolute, 0));
+        table.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
 
         var quickGuide = new Label
         {
-            Text = "1. 登录 AIHub  →  2. 获取 Token 和浏览器 UA  →  3. 粘贴后验证认证",
+            Text = "输入邮箱和密码即可自动登录；session 到期时先刷新，刷新失效后再自动登录。",
             Dock = DockStyle.Fill,
             Font = new Font("Segoe UI", 9F, FontStyle.Bold),
             ForeColor = Color.FromArgb(45, 75, 105),
@@ -134,9 +139,17 @@ internal sealed partial class MainForm
         table.SetColumnSpan(quickGuide, 3);
 
         AddCredentialRow(table, 1, "站点地址", _baseUrlText, _resetBaseUrlButton);
-        AddCredentialRow(table, 2, "登录 Token", _tokenText, _pasteTokenButton);
-        AddCredentialRow(table, 3, "Cookie（可选）", _cookieText, _pasteCookieButton);
-        AddCredentialRow(table, 4, "User-Agent", _userAgentText, _pasteUserAgentButton);
+        AddCredentialRow(table, 2, "邮箱地址", _emailText, new Label());
+        AddCredentialRow(table, 3, "登录密码", _passwordText, new Label());
+
+        _advancedAuthenticationCheck.Dock = DockStyle.Fill;
+        _advancedAuthenticationCheck.Padding = new Padding(0, 3, 0, 0);
+        table.Controls.Add(_advancedAuthenticationCheck, 0, 4);
+        table.SetColumnSpan(_advancedAuthenticationCheck, 3);
+
+        BuildAdvancedAuthenticationPanel();
+        table.Controls.Add(_advancedAuthenticationPanel, 0, 5);
+        table.SetColumnSpan(_advancedAuthenticationPanel, 3);
 
         var persistencePanel = new FlowLayoutPanel
         {
@@ -149,12 +162,12 @@ internal sealed partial class MainForm
         persistencePanel.Controls.Add(_saveSettingsButton);
         persistencePanel.Controls.Add(new Label
         {
-            Text = "Token、Cookie、UA 使用 Windows DPAPI 加密，仅当前 Windows 用户可解密",
+            Text = "邮箱、密码、session、Cookie 和 UA 均使用 Windows DPAPI 加密",
             AutoSize = true,
             Margin = new Padding(10, 6, 0, 0),
             ForeColor = Color.FromArgb(75, 85, 95)
         });
-        table.Controls.Add(persistencePanel, 0, 5);
+        table.Controls.Add(persistencePanel, 0, 6);
         table.SetColumnSpan(persistencePanel, 3);
 
         var authActions = new FlowLayoutPanel
@@ -169,9 +182,42 @@ internal sealed partial class MainForm
         authActions.Controls.Add(_validateButton);
         authActions.Controls.Add(_showCredentialsCheck);
         table.Controls.Add(authActions, 3, 0);
-        table.SetRowSpan(authActions, 6);
+        table.SetRowSpan(authActions, 7);
         group.Controls.Add(table);
         return group;
+    }
+
+    private void BuildAdvancedAuthenticationPanel()
+    {
+        _advancedAuthenticationPanel.Dock = DockStyle.Fill;
+        _advancedAuthenticationPanel.ColumnCount = 3;
+        _advancedAuthenticationPanel.RowCount = 3;
+        _advancedAuthenticationPanel.Visible = false;
+        _advancedAuthenticationPanel.Margin = Padding.Empty;
+        _advancedAuthenticationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
+        _advancedAuthenticationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        _advancedAuthenticationPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
+        for (var row = 0; row < 3; row++)
+        {
+            _advancedAuthenticationPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        }
+
+        AddCredentialRow(_advancedAuthenticationPanel, 0, "登录 Token", _tokenText, _pasteTokenButton);
+        AddCredentialRow(_advancedAuthenticationPanel, 1, "Cookie（可选）", _cookieText, _pasteCookieButton);
+        AddCredentialRow(_advancedAuthenticationPanel, 2, "User-Agent", _userAgentText, _pasteUserAgentButton);
+    }
+
+    private void ToggleAdvancedAuthentication()
+    {
+        var expanded = _advancedAuthenticationCheck.Checked;
+        _advancedAuthenticationCheck.Text = expanded
+            ? "收起高级认证（Token / Cookie / UA）"
+            : "展开高级认证（Token / Cookie / UA）";
+        _advancedAuthenticationPanel.Visible = expanded;
+        if (_advancedAuthenticationPanel.Parent is TableLayoutPanel table)
+        {
+            table.RowStyles[5].Height = expanded ? 108 : 0;
+        }
     }
 
     private Control BuildRoutingToolbar()
@@ -351,13 +397,15 @@ internal sealed partial class MainForm
     private void ConfigureGuidance()
     {
         _toolTip.SetToolTip(_baseUrlText, "默认使用 https://aihub.top，也可填写兼容 Sub2API 的其他站点。");
-        _toolTip.SetToolTip(_tokenText, "网页登录后，在浏览器 Console 执行 localStorage.getItem('auth_token') 获取。");
+        _toolTip.SetToolTip(_emailText, "用于自动登录 AIHub；与密码一起加密保存后可无人值守续期。");
+        _toolTip.SetToolTip(_passwordText, "refresh session 被服务端拒绝后，程序才会使用邮箱和密码重新登录。");
+        _toolTip.SetToolTip(_tokenText, "高级备用入口。邮箱和密码为空时，可直接填写 Bearer Token。");
         _toolTip.SetToolTip(_cookieText, "可选。站点当前主要使用 Bearer Token，单独 Cookie 通常不能访问 Keys。");
         _toolTip.SetToolTip(_userAgentText, "建议填写登录浏览器的 navigator.userAgent，以兼容服务端会话绑定。");
         _toolTip.SetToolTip(_verticalSyncCheck, "Windows 桌面由 DWM 合成；此开关控制窗口和表格双缓冲，减少刷新与滚动闪烁。");
         _toolTip.SetToolTip(_authGuideButton, "打开完整认证步骤和可复制的浏览器命令。");
-        _toolTip.SetToolTip(_persistCredentialsCheck, "勾选后，Token、Cookie 和 UA 会通过 Windows DPAPI 加密保存到当前用户目录。");
-        _toolTip.SetToolTip(_saveSettingsButton, "立即保存连接、认证和路由界面配置。");
+        _toolTip.SetToolTip(_persistCredentialsCheck, "勾选后，账号、session、Cookie 和 UA 会通过 Windows DPAPI 加密保存到当前用户目录。");
+        _toolTip.SetToolTip(_saveSettingsButton, "立即保存连接、认证、Key 勾选和路由界面配置。");
         _toolTip.SetToolTip(_providerGrid, "拖动列分隔线时调整右侧列：向左扩宽右侧列，向右缩窄右侧列。");
         _toolTip.SetToolTip(_keyGrid, "拖动列分隔线时调整右侧列：向左扩宽右侧列，向右缩窄右侧列。");
     }
