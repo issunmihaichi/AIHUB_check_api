@@ -55,7 +55,16 @@ public sealed class AuditLogWriter
     public void Write(RouteAuditEntry entry)
     {
         ArgumentNullException.ThrowIfNull(entry);
-        var line = JsonSerializer.Serialize(entry, JsonOptions) + Environment.NewLine;
+        var safeEntry = entry with
+        {
+            Candidates = entry.Candidates.Select(candidate => candidate with
+            {
+                Multiplier = NormalizeFinite(candidate.Multiplier),
+                LatencyMs = NormalizeLatency(candidate.LatencyMs),
+                Score = NormalizeFinite(candidate.Score)
+            }).ToArray()
+        };
+        var line = JsonSerializer.Serialize(safeEntry, JsonOptions) + Environment.NewLine;
         RotateIfNeeded(Encoding.UTF8.GetByteCount(line));
         using var stream = new FileStream(_path, new FileStreamOptions
         {
@@ -76,6 +85,11 @@ public sealed class AuditLogWriter
             Directory.CreateDirectory(directory);
         }
     }
+
+    private static double NormalizeFinite(double value) => double.IsFinite(value) ? value : 0;
+
+    private static double? NormalizeLatency(double? value) =>
+        value is { } latency && double.IsFinite(latency) && latency >= 0 ? latency : null;
 
     private void RotateIfNeeded(int incomingBytes)
     {

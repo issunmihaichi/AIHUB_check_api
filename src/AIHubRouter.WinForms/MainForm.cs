@@ -87,6 +87,7 @@ internal sealed partial class MainForm : Form
         {
             if (!_applyingSessionCredentials)
             {
+                _currentSession = null;
                 InvalidateRoutingService();
             }
         };
@@ -303,10 +304,12 @@ internal sealed partial class MainForm : Form
         _lastEvaluation = result.Evaluation;
         _summary = new MonitorSummary { Apis = result.Providers.ToList() };
         _groups = result.Groups;
+        _userRates = result.UserGroupRates;
         _bestCandidate = result.Decision.Target;
         ApplyKeys(result.Keys);
 
         var groupLookup = _groups.ToDictionary(group => group.Id);
+        var candidateLookup = result.Evaluation.EligibleCandidates.ToDictionary(candidate => candidate.Group.Id);
         var rows = result.Providers
             .Where(provider => provider.Platform.Equals(_platformCombo.SelectedItem?.ToString() ?? "openai", StringComparison.OrdinalIgnoreCase))
             .Select(provider =>
@@ -319,8 +322,8 @@ internal sealed partial class MainForm : Form
                     : groupId is { } currentGroupId && currentGroupId == result.Decision.Current?.Group.Id ? "当前"
                     : groupId is { } baselineGroupId && baselineGroupId == result.Evaluation.Baseline?.Group.Id ? "最低价"
                     : string.Empty;
-                var effective = groupId is { } group && _userRates.TryGetValue(group, out var rate)
-                    ? $"{rate:0.####} *"
+                var effective = groupId is { } effectiveGroup && candidateLookup.TryGetValue(effectiveGroup, out var candidate)
+                    ? $"{candidate.EffectiveMultiplier:0.####}{(candidate.HasUserRateOverride ? " *" : string.Empty)}"
                     : $"{provider.PriceMultiplier:0.####}";
                 return new ProviderGridRow
                 {
@@ -344,6 +347,14 @@ internal sealed partial class MainForm : Form
         var changeText = result.DryRun
             ? $"模拟：{result.ChangedKeyCount} 个 Key 将切换"
             : $"已切换 {result.ChangedKeyCount} 个 Key";
+        var failedNames = result.KeyResults
+            .Where(key => !key.Success)
+            .Select(key => key.KeyName)
+            .ToArray();
+        if (failedNames.Length > 0)
+        {
+            changeText += $"，失败 {failedNames.Length} 个：{string.Join("、", failedNames)}";
+        }
         SetStatus($"{reason}；{changeText}", result.FailedKeyCount == 0);
         WriteAudit(result);
     }
@@ -553,6 +564,12 @@ internal sealed partial class MainForm : Form
                 var overrideRate = 0d;
                 var hasOverride = provider.GroupId is { } id && _userRates.TryGetValue(id, out overrideRate);
                 var effectiveRate = hasOverride ? overrideRate : provider.PriceMultiplier;
+                if (provider.GroupId is { } candidateGroup &&
+                    _lastEvaluation?.EligibleCandidates.FirstOrDefault(candidate => candidate.Group.Id == candidateGroup) is { } evaluatedCandidate)
+                {
+                    effectiveRate = evaluatedCandidate.EffectiveMultiplier;
+                    hasOverride = evaluatedCandidate.HasUserRateOverride;
+                }
                 var isFresh = provider.CheckedAt is { } checkedAt &&
                     now - checkedAt >= TimeSpan.FromMinutes(-1) &&
                     now - checkedAt <= criteria.MaximumStatusAge;
@@ -698,6 +715,7 @@ internal sealed partial class MainForm : Form
     private void ShowAuthenticationGuide()
     {
         using var dialog = new AuthGuideDialog(_baseUrlText.Text);
+        NativeThemeManager.Apply(dialog, _activePalette);
         dialog.ShowDialog(this);
     }
 

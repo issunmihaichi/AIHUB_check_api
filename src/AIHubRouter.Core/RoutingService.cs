@@ -18,6 +18,7 @@ public sealed record RoutingCycleResult(
     RouteEvaluation Evaluation,
     IReadOnlyList<ProviderStatus> Providers,
     IReadOnlyList<GroupInfo> Groups,
+    IReadOnlyDictionary<long, double> UserGroupRates,
     IReadOnlyList<ApiKeyInfo> Keys,
     IReadOnlyList<long> SelectedKeyIds,
     IReadOnlyList<KeyRouteResult> KeyResults,
@@ -135,7 +136,7 @@ public sealed class RoutingService : IDisposable
             observedGroupId);
         var keyResults = new List<KeyRouteResult>();
 
-        if (decisionResult.Decision.ShouldSwitch && decisionResult.Decision.Target is { } target)
+        if (decisionResult.Decision.Target is { } target)
         {
             foreach (var key in selectedKeys)
             {
@@ -169,6 +170,13 @@ public sealed class RoutingService : IDisposable
                 }
             }
         }
+        else
+        {
+            foreach (var key in selectedKeys)
+            {
+                keyResults.Add(new KeyRouteResult(key.Id, key.Name, false, true, null));
+            }
+        }
 
         if (!dryRun)
         {
@@ -183,6 +191,7 @@ public sealed class RoutingService : IDisposable
             evaluation,
             summary.Apis,
             _cachedGroups,
+            _cachedRates,
             _cachedKeys,
             selectedKeys.Select(key => key.Id).ToArray(),
             keyResults,

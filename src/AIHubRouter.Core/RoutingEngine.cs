@@ -170,7 +170,13 @@ public static class RoutingEngine
     {
         var pricePremiumRatio = (candidate.EffectiveMultiplier - minimumMultiplier) / minimumMultiplier;
         var speedupRatio = baselineLatency / candidate.Provider.FirstTokenLatencyMs!.Value - 1;
-        return latencyWeight * speedupRatio - priceWeight * pricePremiumRatio;
+        var score = latencyWeight * speedupRatio - priceWeight * pricePremiumRatio;
+        if (double.IsFinite(score))
+        {
+            return score;
+        }
+
+        return score > 0 ? double.MaxValue : double.MinValue;
     }
 
     private static bool IsFresh(DateTimeOffset? checkedAt, DateTimeOffset now, TimeSpan maximumAge)

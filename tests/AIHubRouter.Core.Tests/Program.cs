@@ -19,6 +19,7 @@ var tests = new (string Name, Action Body)[]
     ("Speed mode accepts larger price premium", TestSpeedModeAcceptsLargerPremium),
     ("Missing latency ranks last", TestMissingLatencyRanksLast),
     ("Invalid measurements are excluded", TestInvalidMeasurementsAreExcluded),
+    ("Extreme latency scores stay finite", TestExtremeLatencyScoresStayFinite),
     ("Zero multiplier remains free", TestZeroMultiplierWindow),
     ("Initial route has an explainable reason", TestInitialRouteDecision),
     ("Weighted speed winner switches immediately", TestWeightedSpeedWinnerSwitchesImmediately),
@@ -29,13 +30,17 @@ var tests = new (string Name, Action Body)[]
     ("Unreadable route state resets safely", TestUnreadableRouteStateResets),
     ("Dry run never updates a Key", TestDryRunNeverUpdatesKey),
     ("Account data is cached but monitor data is fresh", TestAccountDataCache),
+    ("Routing result exposes cached user rates", TestRoutingResultExposesUserRates),
     ("Forced refresh bypasses account cache", TestForcedAccountRefresh),
     ("Business authentication failure retries once", TestBusinessAuthenticationRetry),
     ("Network failure never triggers login", TestRoutingNetworkFailureDoesNotLogin),
     ("Explicit empty Key selection is rejected", TestRoutingRejectsEmptySelection),
     ("Successful updates persist target state", TestSuccessfulRoutePersistsState),
     ("Partial update failure clears route certainty", TestPartialFailureClearsState),
+    ("Already optimal cycle reports selected Keys", TestAlreadyOptimalReportsSelectedKeys),
+    ("Mixed selected groups reconcile to target", TestMixedSelectedGroupsReconcile),
     ("Audit log writes valid JSON and rotates safely", TestAuditLogWritesValidJsonAndRotates),
+    ("Publish script checks native exit codes", TestPublishScriptChecksNativeExitCodes),
     ("Encrypted settings roundtrip", TestEncryptedSettingsRoundtrip),
     ("Usable access token is reused", TestUsableAccessTokenIsReused),
     ("Expired access token refreshes first", TestExpiredAccessTokenRefreshesFirst),
@@ -274,6 +279,18 @@ static void TestInvalidMeasurementsAreExcluded()
         "Invalid multiplier measurements were not filtered.");
 }
 
+static void TestExtremeLatencyScoresStayFinite()
+{
+    var now = DateTimeOffset.UtcNow;
+    var result = RoutingEngine.Evaluate(
+        [Provider(1, 0.02, true, 0.99, now, double.MaxValue), Provider(2, 0.021, true, 0.99, now, double.Epsilon)],
+        [Group(1), Group(2)],
+        new Dictionary<long, double>(),
+        Policy(RoutingMode.Speed),
+        now);
+    Assert(result.CandidateScores.Values.All(double.IsFinite), "Extreme latency produced a non-finite score.");
+}
+
 static void TestZeroMultiplierWindow()
 {
     var now = DateTimeOffset.UtcNow;
@@ -422,6 +439,18 @@ static void TestAccountDataCache()
         "Account data was not cached.");
 }
 
+static void TestRoutingResultExposesUserRates()
+{
+    var now = DateTimeOffset.UtcNow;
+    var api = new StubRoutingClient(now) { UserRateOverride = 0.007 };
+    var settings = new PersistentAppSettings { KeySelectionInitialized = true, SelectedKeyIds = [10] };
+    using var service = new RoutingService(settings, new PersistentCredentials { BearerToken = "synthetic-access" },
+        new MemoryRouteStateStore(), new StubRoutingClientFactory(api), utcNow: () => now);
+    var result = service.RunOnceAsync(dryRun: true).GetAwaiter().GetResult();
+    Assert(result.UserGroupRates.TryGetValue(2, out var rate) && Math.Abs(rate - 0.007) < 0.000001,
+        "Routing result did not expose the account rate used for evaluation.");
+}
+
 static void TestForcedAccountRefresh()
 {
     var now = DateTimeOffset.UtcNow;
@@ -519,6 +548,33 @@ static void TestPartialFailureClearsState()
     Assert(state.Load().CurrentGroupId is null, "Partial Key failure retained route certainty.");
 }
 
+static void TestAlreadyOptimalReportsSelectedKeys()
+{
+    var now = DateTimeOffset.UtcNow;
+    var api = new StubRoutingClient(now) { KeysAlreadyOnTarget = true };
+    var settings = new PersistentAppSettings { KeySelectionInitialized = true, SelectedKeyIds = [10] };
+    using var service = new RoutingService(settings, new PersistentCredentials { BearerToken = "synthetic-access" },
+        new MemoryRouteStateStore(), new StubRoutingClientFactory(api), utcNow: () => now);
+    var result = service.RunOnceAsync(dryRun: false).GetAwaiter().GetResult();
+    Assert(result.KeyResults.Count == 1 && !result.KeyResults[0].Changed && result.KeyResults[0].Success,
+        "Already-optimal cycle did not report its selected Key.");
+}
+
+static void TestMixedSelectedGroupsReconcile()
+{
+    var now = DateTimeOffset.UtcNow;
+    var api = new StubRoutingClient(now) { TwoKeys = true, MixedGroups = true };
+    var state = new MemoryRouteStateStore();
+    state.Save(new RouteState { CurrentGroupId = 2 });
+    var settings = new PersistentAppSettings { KeySelectionInitialized = true, SelectedKeyIds = [10, 11] };
+    using var service = new RoutingService(settings, new PersistentCredentials { BearerToken = "synthetic-access" },
+        state, new StubRoutingClientFactory(api), utcNow: () => now);
+    var result = service.RunOnceAsync().GetAwaiter().GetResult();
+    Assert(api.UpdateCalls == 1 && result.ChangedKeyCount == 1,
+        "A selected Key on a different group was not reconciled.");
+    Assert(state.Load().CurrentGroupId == 2, "Mixed-group reconciliation lost the target state.");
+}
+
 static void TestAuditLogWritesValidJsonAndRotates()
 {
     var directory = Path.Combine(Path.GetTempPath(), "AIHubRouter.Tests", Guid.NewGuid().ToString("N"));
@@ -533,7 +589,10 @@ static void TestAuditLogWritesValidJsonAndRotates()
             1,
             2,
             false,
-            [new RouteAuditCandidate(2, 0.02, 250, 0.4, true)],
+            [
+                new RouteAuditCandidate(2, 0.02, 250, 0.4, true),
+                new RouteAuditCandidate(3, double.NaN, double.PositiveInfinity, double.NegativeInfinity, false)
+            ],
             [new RouteAuditKey(10, true, true, null)]);
         writer.Write(entry);
         writer.Write(entry);
@@ -559,6 +618,22 @@ static void TestAuditLogWritesValidJsonAndRotates()
     {
         if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
     }
+}
+
+static void TestPublishScriptChecksNativeExitCodes()
+{
+    var directory = new DirectoryInfo(AppContext.BaseDirectory);
+    while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "scripts", "publish.ps1")))
+    {
+        directory = directory.Parent;
+    }
+
+    Assert(directory is not null, "Repository root was not found from the test output directory.");
+    var script = File.ReadAllText(Path.Combine(directory!.FullName, "scripts", "publish.ps1"));
+    Assert(script.Contains("function Invoke-DotNet", StringComparison.Ordinal),
+        "Publish script has no checked dotnet wrapper.");
+    Assert(!script.Split('\n').Any(line => line.TrimStart().StartsWith("dotnet ", StringComparison.OrdinalIgnoreCase)),
+        "Publish script contains an unchecked dotnet command.");
 }
 
 static void TestEncryptedSettingsRoundtrip()
@@ -1077,7 +1152,10 @@ sealed class StubRoutingClient(DateTimeOffset now) : IAIHubApiClient
     public bool FailFirstSummaryAuth { get; init; }
     public bool ThrowNetwork { get; init; }
     public bool TwoKeys { get; init; }
+    public bool KeysAlreadyOnTarget { get; init; }
+    public bool MixedGroups { get; init; }
     public int FailUpdateCount { get; init; }
+    public double? UserRateOverride { get; init; }
 
     public Task<MonitorSummary> GetProviderSummaryAsync(CancellationToken cancellationToken = default)
     {
@@ -1115,7 +1193,10 @@ sealed class StubRoutingClient(DateTimeOffset now) : IAIHubApiClient
     public Task<IReadOnlyDictionary<long, double>> GetUserGroupRatesAsync(CancellationToken cancellationToken = default)
     {
         RatesCalls++;
-        return Task.FromResult<IReadOnlyDictionary<long, double>>(new Dictionary<long, double>());
+        IReadOnlyDictionary<long, double> rates = UserRateOverride is { } value
+            ? new Dictionary<long, double> { [2] = value }
+            : new Dictionary<long, double>();
+        return Task.FromResult(rates);
     }
 
     public Task<IReadOnlyList<ApiKeyInfo>> GetAllKeysAsync(CancellationToken cancellationToken = default)
@@ -1123,11 +1204,17 @@ sealed class StubRoutingClient(DateTimeOffset now) : IAIHubApiClient
         KeysCalls++;
         var keys = new List<ApiKeyInfo>
         {
-            new() { Id = 10, Name = "Synthetic Key 10", Status = "active", GroupId = 1 }
+            new() { Id = 10, Name = "Synthetic Key 10", Status = "active", GroupId = KeysAlreadyOnTarget ? 2 : 1 }
         };
         if (TwoKeys)
         {
-            keys.Add(new ApiKeyInfo { Id = 11, Name = "Synthetic Key 11", Status = "active", GroupId = 1 });
+            keys.Add(new ApiKeyInfo
+            {
+                Id = 11,
+                Name = "Synthetic Key 11",
+                Status = "active",
+                GroupId = KeysAlreadyOnTarget || !MixedGroups ? (KeysAlreadyOnTarget ? 2 : 1) : 2
+            });
         }
 
         return Task.FromResult<IReadOnlyList<ApiKeyInfo>>(keys);
