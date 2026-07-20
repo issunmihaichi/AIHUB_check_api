@@ -19,6 +19,13 @@ var tests = new (string Name, Action Body)[]
     ("Missing latency ranks last", TestMissingLatencyRanksLast),
     ("Invalid measurements are excluded", TestInvalidMeasurementsAreExcluded),
     ("Zero multiplier remains free", TestZeroMultiplierWindow),
+    ("Initial route has an explainable reason", TestInitialRouteDecision),
+    ("Weighted speed winner switches immediately", TestWeightedSpeedWinnerSwitchesImmediately),
+    ("Already optimal route does not switch", TestAlreadyOptimalRouteDecision),
+    ("Invalid current route switches", TestInvalidCurrentRouteDecision),
+    ("No candidate keeps route state", TestNoCandidateDecision),
+    ("Route state persists atomically", TestRouteStateRoundtrip),
+    ("Unreadable route state resets safely", TestUnreadableRouteStateResets),
     ("Encrypted settings roundtrip", TestEncryptedSettingsRoundtrip),
     ("Usable access token is reused", TestUsableAccessTokenIsReused),
     ("Expired access token refreshes first", TestExpiredAccessTokenRefreshesFirst),
@@ -267,6 +274,110 @@ static void TestZeroMultiplierWindow()
         Policy(RoutingMode.Speed),
         now);
     Assert(result.Recommended?.Group.Id == 1, "Zero multiplier route was not retained.");
+}
+
+static void TestInitialRouteDecision()
+{
+    var now = DateTimeOffset.UtcNow;
+    var evaluation = RoutingEngine.Evaluate(
+        [Provider(1, 0.02, true, 0.99, now), Provider(2, 0.01, true, 0.99, now)],
+        [Group(1), Group(2)],
+        new Dictionary<long, double>(),
+        Policy(RoutingMode.Economy),
+        now);
+    var result = RouteDecisionEngine.Decide(evaluation, new RouteState(), now);
+    Assert(result.Decision.ShouldSwitch && result.Decision.Reason == RouteDecisionReason.InitialRoute,
+        "Initial route was not explained as an initial route.");
+    Assert(result.NextState.CurrentGroupId == 2, "Initial route state did not target the recommendation.");
+}
+
+static void TestWeightedSpeedWinnerSwitchesImmediately()
+{
+    var now = DateTimeOffset.UtcNow;
+    var evaluation = RoutingEngine.Evaluate(
+        [Provider(1, 0.02, true, 0.99, now, 10_000), Provider(2, 0.021, true, 0.99, now, 1_000)],
+        [Group(1), Group(2)],
+        new Dictionary<long, double>(),
+        Policy(RoutingMode.Balanced),
+        now);
+    var result = RouteDecisionEngine.Decide(evaluation, new RouteState { CurrentGroupId = 1 }, now, 1);
+    Assert(result.Decision.ShouldSwitch && result.Decision.Reason == RouteDecisionReason.FasterForWeightedTradeoff,
+        "A clear weighted speed winner did not switch immediately.");
+}
+
+static void TestAlreadyOptimalRouteDecision()
+{
+    var now = DateTimeOffset.UtcNow;
+    var evaluation = RoutingEngine.Evaluate(
+        [Provider(1, 0.02, true, 0.99, now)],
+        [Group(1)],
+        new Dictionary<long, double>(),
+        Policy(RoutingMode.Economy),
+        now);
+    var result = RouteDecisionEngine.Decide(evaluation, new RouteState { CurrentGroupId = 1 }, now, 1);
+    Assert(!result.Decision.ShouldSwitch && result.Decision.Reason == RouteDecisionReason.AlreadyOptimal,
+        "An already optimal route was not recognized.");
+}
+
+static void TestInvalidCurrentRouteDecision()
+{
+    var now = DateTimeOffset.UtcNow;
+    var evaluation = RoutingEngine.Evaluate(
+        [Provider(2, 0.02, true, 0.99, now)],
+        [Group(2)],
+        new Dictionary<long, double>(),
+        Policy(RoutingMode.Economy),
+        now);
+    var result = RouteDecisionEngine.Decide(evaluation, new RouteState { CurrentGroupId = 1 }, now, 1);
+    Assert(result.Decision.ShouldSwitch && result.Decision.Reason == RouteDecisionReason.CurrentRouteInvalid,
+        "An invalid current route was not explained.");
+}
+
+static void TestNoCandidateDecision()
+{
+    var now = DateTimeOffset.UtcNow;
+    var evaluation = RoutingEngine.Evaluate(
+        Array.Empty<ProviderStatus>(),
+        Array.Empty<GroupInfo>(),
+        new Dictionary<long, double>(),
+        Policy(RoutingMode.Economy),
+        now);
+    var result = RouteDecisionEngine.Decide(evaluation, new RouteState { CurrentGroupId = 7 }, now, 7);
+    Assert(!result.Decision.ShouldSwitch && result.Decision.Reason == RouteDecisionReason.NoCandidate,
+        "No-candidate route did not preserve a safe decision.");
+    Assert(result.NextState.CurrentGroupId == 7, "No-candidate route lost the observed group.");
+}
+
+static void TestRouteStateRoundtrip()
+{
+    var directory = Path.Combine(Path.GetTempPath(), "AIHubRouter.Tests", Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new JsonRouteStateStore(directory);
+        store.Save(new RouteState { CurrentGroupId = 42 });
+        Assert(store.Load().CurrentGroupId == 42, "Route state did not roundtrip.");
+        Assert(!File.Exists(Path.Combine(directory, "route-state.json.tmp")), "Temporary route state was left behind.");
+    }
+    finally
+    {
+        if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+    }
+}
+
+static void TestUnreadableRouteStateResets()
+{
+    var directory = Path.Combine(Path.GetTempPath(), "AIHubRouter.Tests", Guid.NewGuid().ToString("N"));
+    try
+    {
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "route-state.json"), "{not-json");
+        Assert(new JsonRouteStateStore(directory).Load().CurrentGroupId is null,
+            "Unreadable route state was allowed to break startup.");
+    }
+    finally
+    {
+        if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+    }
 }
 
 static void TestEncryptedSettingsRoundtrip()
