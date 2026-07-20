@@ -13,11 +13,17 @@ public sealed class PersistentAppSettings
     public int MinimumSuccessPercent { get; init; }
     public int PollingIntervalSeconds { get; init; } = 60;
     public bool SmoothRendering { get; init; } = true;
+    public bool KeySelectionInitialized { get; init; }
+    public long[] SelectedKeyIds { get; init; } = [];
 }
 
 public sealed class PersistentCredentials
 {
+    public string Email { get; init; } = string.Empty;
+    public string Password { get; init; } = string.Empty;
     public string BearerToken { get; init; } = string.Empty;
+    public string RefreshToken { get; init; } = string.Empty;
+    public DateTimeOffset? AccessTokenExpiresAt { get; init; }
     public string Cookie { get; init; } = string.Empty;
     public string UserAgent { get; init; } = string.Empty;
 }

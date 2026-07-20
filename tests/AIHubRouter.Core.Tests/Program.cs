@@ -16,7 +16,8 @@ var tests = new (string Name, Action Body)[]
     ("Rejected refresh falls back to login", TestRejectedRefreshFallsBackToLogin),
     ("Login endpoint maps session", TestLoginEndpointMapsSession),
     ("Refresh endpoint maps rotated session", TestRefreshEndpointMapsRotatedSession),
-    ("Interactive login requirement is rejected", TestInteractiveLoginRequirementIsRejected)
+    ("Interactive login requirement is rejected", TestInteractiveLoginRequirementIsRejected),
+    ("Empty key selection roundtrips", TestEmptyKeySelectionRoundtrips)
 };
 
 var failures = 0;
@@ -139,23 +140,40 @@ static void TestEncryptedSettingsRoundtrip()
             Platform = "openai",
             MinimumSuccessPercent = 85,
             PollingIntervalSeconds = 120,
-            SmoothRendering = true
+            SmoothRendering = true,
+            KeySelectionInitialized = true,
+            SelectedKeyIds = [42, 84]
         };
+        var expiresAt = new DateTimeOffset(2026, 7, 20, 12, 0, 0, TimeSpan.Zero);
         var credentials = new PersistentCredentials
         {
+            Email = "distribution-test@example.test",
+            Password = "unit-test-password",
             BearerToken = secretToken,
+            RefreshToken = "unit-test-refresh-token",
+            AccessTokenExpiresAt = expiresAt,
             Cookie = "session=secret-cookie",
             UserAgent = "test-user-agent"
         };
 
         store.Save(settings, credentials);
         var encrypted = File.ReadAllBytes(Path.Combine(directory, "credentials.dat"));
-        Assert(!Encoding.UTF8.GetString(encrypted).Contains(secretToken, StringComparison.Ordinal), "Credential file contains plaintext token.");
+        var encryptedText = Encoding.UTF8.GetString(encrypted);
+        Assert(!encryptedText.Contains(secretToken, StringComparison.Ordinal), "Credential file contains plaintext access token.");
+        Assert(!encryptedText.Contains(credentials.RefreshToken, StringComparison.Ordinal), "Credential file contains plaintext refresh token.");
+        Assert(!encryptedText.Contains(credentials.Password, StringComparison.Ordinal), "Credential file contains plaintext password.");
+        Assert(!encryptedText.Contains(credentials.Email, StringComparison.Ordinal), "Credential file contains plaintext email.");
 
         var loaded = store.Load();
         Assert(loaded.Settings.PersistCredentials, "Persistence flag was not restored.");
         Assert(loaded.Settings.PollingIntervalSeconds == 120, "Polling interval was not restored.");
+        Assert(loaded.Settings.KeySelectionInitialized, "Key selection initialized state was not restored.");
+        Assert(loaded.Settings.SelectedKeyIds.SequenceEqual(new long[] { 42, 84 }), "Selected Key IDs were not restored.");
+        Assert(loaded.Credentials?.Email == credentials.Email, "Encrypted email did not roundtrip.");
+        Assert(loaded.Credentials?.Password == credentials.Password, "Encrypted password did not roundtrip.");
         Assert(loaded.Credentials?.BearerToken == secretToken, "Encrypted token did not roundtrip.");
+        Assert(loaded.Credentials?.RefreshToken == credentials.RefreshToken, "Encrypted refresh token did not roundtrip.");
+        Assert(loaded.Credentials?.AccessTokenExpiresAt == expiresAt, "Access token expiration did not roundtrip.");
         Assert(loaded.Credentials?.Cookie == credentials.Cookie, "Encrypted cookie did not roundtrip.");
 
         store.Save(new PersistentAppSettings { PersistCredentials = false }, null);
@@ -353,6 +371,37 @@ static void TestInteractiveLoginRequirementIsRejected()
     catch (InteractiveAuthenticationRequiredException exception)
     {
         Assert(!exception.Message.Contains(temporaryToken, StringComparison.Ordinal), "Interactive auth error leaked the temporary token.");
+    }
+}
+
+static void TestEmptyKeySelectionRoundtrips()
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        return;
+    }
+
+    var directory = Path.Combine(Path.GetTempPath(), "AIHubRouter.Tests", Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new AppSettingsStore(directory);
+        store.Save(new PersistentAppSettings
+        {
+            PersistCredentials = false,
+            KeySelectionInitialized = true,
+            SelectedKeyIds = []
+        }, null);
+
+        var loaded = store.Load();
+        Assert(loaded.Settings.KeySelectionInitialized, "Explicit empty selection lost its initialized state.");
+        Assert(loaded.Settings.SelectedKeyIds.Length == 0, "Explicit empty selection was not preserved.");
+    }
+    finally
+    {
+        if (Directory.Exists(directory))
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 }
 
