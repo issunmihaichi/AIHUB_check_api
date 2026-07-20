@@ -80,3 +80,7 @@ WinForms 不支持安全的程序集裁剪，因此不启用 `PublishTrimmed`。
 程序比较的是 `/providers` 返回的供应商分组倍率，然后通过 `PUT /api/v1/keys/{id}` 更新 Key 的 `group_id`。它不会修改请求中的模型名称。用户专属分组倍率存在时，以专属倍率作为实际价格；同价时依次选择 6 小时可用率更高、首 Token 更快、分组 ID 更小的候选。
 
 站点接口和字段可能随部署版本变化。程序依据 Sub2API 当前公开接口实现，接口不兼容时会显示错误并停止写入。
+
+## 下游贡献与支持范围
+
+本项目仍然只维护 Windows 原生 WinForms。加权路由模式（经济/均衡/速度）、可解释决策、账户缓存、路由状态、模拟运行、无凭据审计日志和原生主题行为参考并适配自 [OnRightPath/AIHubRouter](https://github.com/OnRightPath/AIHubRouter)。下游项目的 Linux、Avalonia、CLI、systemd 和跨平台发布内容不属于本仓库的支持范围。
