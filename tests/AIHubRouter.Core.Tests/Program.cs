@@ -12,6 +12,13 @@ var tests = new (string Name, Action Body)[]
     ("Stale status rejection", TestStaleStatusRejection),
     ("Routing preferences default to Win32-compatible values", TestRoutingPreferenceDefaults),
     ("Routing preferences roundtrip", TestRoutingPreferenceRoundtrip),
+    ("Balanced mode buys meaningful latency", TestBalancedModeBuysLatency),
+    ("Balanced mode keeps price for moderate speed gap", TestBalancedModeKeepsPriceForModerateSpeedGap),
+    ("Economy mode protects price", TestEconomyModeProtectsPrice),
+    ("Speed mode accepts larger price premium", TestSpeedModeAcceptsLargerPremium),
+    ("Missing latency ranks last", TestMissingLatencyRanksLast),
+    ("Invalid measurements are excluded", TestInvalidMeasurementsAreExcluded),
+    ("Zero multiplier remains free", TestZeroMultiplierWindow),
     ("Encrypted settings roundtrip", TestEncryptedSettingsRoundtrip),
     ("Usable access token is reused", TestUsableAccessTokenIsReused),
     ("Expired access token refreshes first", TestExpiredAccessTokenRefreshesFirst),
@@ -169,6 +176,97 @@ static void TestRoutingPreferenceRoundtrip()
             Directory.Delete(directory, recursive: true);
         }
     }
+}
+
+static void TestBalancedModeBuysLatency()
+{
+    var now = DateTimeOffset.UtcNow;
+    var result = RoutingEngine.Evaluate(
+        [Provider(1, 0.02, true, 0.99, now, 10_000), Provider(2, 0.022, true, 0.99, now, 1_000)],
+        [Group(1), Group(2)],
+        new Dictionary<long, double>(),
+        Policy(RoutingMode.Balanced),
+        now);
+    Assert(result.Recommended?.Group.Id == 2, "Balanced mode did not buy a large latency improvement.");
+    Assert(result.CandidateScores.ContainsKey(2), "Balanced score was not exposed.");
+}
+
+static void TestBalancedModeKeepsPriceForModerateSpeedGap()
+{
+    var now = DateTimeOffset.UtcNow;
+    var result = RoutingEngine.Evaluate(
+        [Provider(1, 0.03, true, 0.99, now, 6_051), Provider(2, 0.05, true, 0.99, now, 1_891)],
+        [Group(1), Group(2)],
+        new Dictionary<long, double>(),
+        Policy(RoutingMode.Balanced),
+        now);
+    Assert(result.Recommended?.Group.Id == 1, "Balanced mode paid too much for a moderate latency gap.");
+}
+
+static void TestEconomyModeProtectsPrice()
+{
+    var now = DateTimeOffset.UtcNow;
+    var result = RoutingEngine.Evaluate(
+        [Provider(1, 0.02, true, 0.99, now, 2_000), Provider(2, 0.022, true, 0.99, now, 1_000)],
+        [Group(1), Group(2)],
+        new Dictionary<long, double>(),
+        Policy(RoutingMode.Economy),
+        now);
+    Assert(result.Recommended?.Group.Id == 1, "Economy mode paid too much for a latency improvement.");
+}
+
+static void TestSpeedModeAcceptsLargerPremium()
+{
+    var now = DateTimeOffset.UtcNow;
+    var result = RoutingEngine.Evaluate(
+        [Provider(1, 0.02, true, 0.99, now, 10_000), Provider(2, 0.04, true, 0.99, now, 2_000)],
+        [Group(1), Group(2)],
+        new Dictionary<long, double>(),
+        Policy(RoutingMode.Speed),
+        now);
+    Assert(result.Recommended?.Group.Id == 2, "Speed mode rejected a large latency gain.");
+}
+
+static void TestMissingLatencyRanksLast()
+{
+    var now = DateTimeOffset.UtcNow;
+    var result = RoutingEngine.Evaluate(
+        [Provider(1, 0.02, true, 0.99, now, null), Provider(2, 0.02, true, 0.99, now, 2_000)],
+        [Group(1), Group(2)],
+        new Dictionary<long, double>(),
+        Policy(RoutingMode.Balanced),
+        now);
+    Assert(result.Recommended?.Group.Id == 2, "Missing latency outranked a measured latency.");
+}
+
+static void TestInvalidMeasurementsAreExcluded()
+{
+    var now = DateTimeOffset.UtcNow;
+    var result = RoutingEngine.Evaluate(
+        [
+            Provider(1, double.NaN, true, 0.99, now, 100),
+            Provider(2, double.PositiveInfinity, true, 0.99, now, 100),
+            Provider(3, -0.01, true, 0.99, now, 100),
+            Provider(4, 0.04, true, 0.99, now, 100)
+        ],
+        [Group(1), Group(2), Group(3), Group(4)],
+        new Dictionary<long, double>(),
+        Policy(RoutingMode.Balanced),
+        now);
+    Assert(result.EligibleCandidates.Count == 1 && result.Recommended?.Group.Id == 4,
+        "Invalid multiplier measurements were not filtered.");
+}
+
+static void TestZeroMultiplierWindow()
+{
+    var now = DateTimeOffset.UtcNow;
+    var result = RoutingEngine.Evaluate(
+        [Provider(1, 0, true, 0.99, now, 8_000), Provider(2, 0.001, true, 0.99, now, 100)],
+        [Group(1), Group(2)],
+        new Dictionary<long, double>(),
+        Policy(RoutingMode.Speed),
+        now);
+    Assert(result.Recommended?.Group.Id == 1, "Zero multiplier route was not retained.");
 }
 
 static void TestEncryptedSettingsRoundtrip()
@@ -606,7 +704,7 @@ static HttpResponseMessage JsonResponse(string json)
     };
 }
 
-static ProviderStatus Provider(long groupId, double rate, bool available, double success, DateTimeOffset checkedAt)
+static ProviderStatus Provider(long groupId, double rate, bool available, double success, DateTimeOffset checkedAt, double? latency = 1000)
 {
     return new ProviderStatus
     {
@@ -618,7 +716,7 @@ static ProviderStatus Provider(long groupId, double rate, bool available, double
         Available = available,
         Enabled = true,
         CheckedAt = checkedAt,
-        FirstTokenLatencyMs = 1000,
+        FirstTokenLatencyMs = latency,
         SuccessRates = new Dictionary<string, double> { ["6h"] = success }
     };
 }
@@ -636,6 +734,14 @@ static GroupInfo Group(long id)
 }
 
 static RoutingCriteria Criteria() => new("openai", 0, TimeSpan.FromMinutes(15));
+
+static BalancedRoutingPolicy Policy(RoutingMode mode) => new()
+{
+    Platform = "openai",
+    Mode = mode,
+    MinimumSuccessRate6h = 0,
+    MaximumStatusAge = TimeSpan.FromMinutes(15)
+};
 
 static void Assert(bool condition, string message)
 {
