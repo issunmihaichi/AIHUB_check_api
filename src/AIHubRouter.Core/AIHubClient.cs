@@ -6,7 +6,19 @@ using System.Text.Json.Serialization;
 
 namespace AIHubRouter.Core;
 
-public sealed class AIHubClient : IDisposable
+public interface IAIHubApiClient : IDisposable
+{
+    Task<MonitorSummary> GetProviderSummaryAsync(CancellationToken cancellationToken = default);
+    Task<JsonElement> ValidateLoginAsync(CancellationToken cancellationToken = default);
+    Task<AuthSession> LoginAsync(LoginCredentials credentials, CancellationToken cancellationToken = default);
+    Task<AuthSession> RefreshSessionAsync(string refreshToken, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<GroupInfo>> GetAvailableGroupsAsync(CancellationToken cancellationToken = default);
+    Task<IReadOnlyDictionary<long, double>> GetUserGroupRatesAsync(CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<ApiKeyInfo>> GetAllKeysAsync(CancellationToken cancellationToken = default);
+    Task<ApiKeyInfo> UpdateKeyGroupAsync(long keyId, long groupId, CancellationToken cancellationToken = default);
+}
+
+public sealed class AIHubClient : IAIHubApiClient
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {

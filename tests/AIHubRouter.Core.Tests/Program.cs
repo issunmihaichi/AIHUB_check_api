@@ -1,6 +1,7 @@
 using AIHubRouter.Core;
 using System.Net;
 using System.Text;
+using System.Text.Json;
 
 var tests = new (string Name, Action Body)[]
 {
@@ -26,6 +27,14 @@ var tests = new (string Name, Action Body)[]
     ("No candidate keeps route state", TestNoCandidateDecision),
     ("Route state persists atomically", TestRouteStateRoundtrip),
     ("Unreadable route state resets safely", TestUnreadableRouteStateResets),
+    ("Dry run never updates a Key", TestDryRunNeverUpdatesKey),
+    ("Account data is cached but monitor data is fresh", TestAccountDataCache),
+    ("Forced refresh bypasses account cache", TestForcedAccountRefresh),
+    ("Business authentication failure retries once", TestBusinessAuthenticationRetry),
+    ("Network failure never triggers login", TestRoutingNetworkFailureDoesNotLogin),
+    ("Explicit empty Key selection is rejected", TestRoutingRejectsEmptySelection),
+    ("Successful updates persist target state", TestSuccessfulRoutePersistsState),
+    ("Partial update failure clears route certainty", TestPartialFailureClearsState),
     ("Encrypted settings roundtrip", TestEncryptedSettingsRoundtrip),
     ("Usable access token is reused", TestUsableAccessTokenIsReused),
     ("Expired access token refreshes first", TestExpiredAccessTokenRefreshesFirst),
@@ -378,6 +387,135 @@ static void TestUnreadableRouteStateResets()
     {
         if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
     }
+}
+
+static void TestDryRunNeverUpdatesKey()
+{
+    var now = DateTimeOffset.UtcNow;
+    var api = new StubRoutingClient(now);
+    var settings = new PersistentAppSettings { KeySelectionInitialized = true, SelectedKeyIds = [10] };
+    using var service = new RoutingService(
+        settings,
+        new PersistentCredentials { BearerToken = "synthetic-access" },
+        new MemoryRouteStateStore(),
+        new StubRoutingClientFactory(api),
+        utcNow: () => now);
+
+    var result = service.RunOnceAsync(dryRun: true).GetAwaiter().GetResult();
+    Assert(result.Decision.ShouldSwitch, "Dry run did not calculate a switch.");
+    Assert(api.UpdateCalls == 0, "Dry run called UpdateKeyGroupAsync.");
+    Assert(result.KeyResults.Single().Changed, "Dry run did not report the proposed Key change.");
+}
+
+static void TestAccountDataCache()
+{
+    var now = DateTimeOffset.UtcNow;
+    var api = new StubRoutingClient(now);
+    var settings = new PersistentAppSettings { KeySelectionInitialized = true, SelectedKeyIds = [10] };
+    using var service = new RoutingService(settings, new PersistentCredentials { BearerToken = "synthetic-access" },
+        new MemoryRouteStateStore(), new StubRoutingClientFactory(api), utcNow: () => now);
+    service.RunOnceAsync(dryRun: true).GetAwaiter().GetResult();
+    service.RunOnceAsync(dryRun: true).GetAwaiter().GetResult();
+    Assert(api.SummaryCalls == 2, "Monitor summary was not fetched every cycle.");
+    Assert(api.GroupsCalls == 1 && api.RatesCalls == 1 && api.KeysCalls == 1,
+        "Account data was not cached.");
+}
+
+static void TestForcedAccountRefresh()
+{
+    var now = DateTimeOffset.UtcNow;
+    var api = new StubRoutingClient(now);
+    var settings = new PersistentAppSettings { KeySelectionInitialized = true, SelectedKeyIds = [10] };
+    using var service = new RoutingService(settings, new PersistentCredentials { BearerToken = "synthetic-access" },
+        new MemoryRouteStateStore(), new StubRoutingClientFactory(api), utcNow: () => now);
+    service.RunOnceAsync(dryRun: true).GetAwaiter().GetResult();
+    service.RunOnceAsync(dryRun: true, forceAccountRefresh: true).GetAwaiter().GetResult();
+    Assert(api.GroupsCalls == 2 && api.RatesCalls == 2 && api.KeysCalls == 2,
+        "Forced account refresh did not bypass the cache.");
+}
+
+static void TestBusinessAuthenticationRetry()
+{
+    var now = DateTimeOffset.UtcNow;
+    var api = new StubRoutingClient(now) { FailFirstSummaryAuth = true };
+    var settings = new PersistentAppSettings { KeySelectionInitialized = true, SelectedKeyIds = [10] };
+    using var service = new RoutingService(settings, new PersistentCredentials
+    {
+        Email = "user@example.test",
+        Password = "synthetic-password",
+        BearerToken = "synthetic-old-access",
+        RefreshToken = "synthetic-refresh",
+        AccessTokenExpiresAt = now.AddHours(1)
+    }, new MemoryRouteStateStore(), new StubRoutingClientFactory(api), utcNow: () => now);
+    var result = service.RunOnceAsync(dryRun: true).GetAwaiter().GetResult();
+    Assert(result.DryRun && api.SummaryCalls == 2, "Business authentication failure was not retried once.");
+    Assert(api.RefreshCalls == 1 && api.LoginCalls == 0, "Retry did not refresh before password login.");
+}
+
+static void TestRoutingNetworkFailureDoesNotLogin()
+{
+    var now = DateTimeOffset.UtcNow;
+    var api = new StubRoutingClient(now) { ThrowNetwork = true };
+    var settings = new PersistentAppSettings { KeySelectionInitialized = true, SelectedKeyIds = [10] };
+    using var service = new RoutingService(settings, new PersistentCredentials
+    {
+        Email = "user@example.test", Password = "synthetic-password", RefreshToken = "synthetic-refresh",
+        AccessTokenExpiresAt = now.AddHours(1), BearerToken = "synthetic-access"
+    }, new MemoryRouteStateStore(), new StubRoutingClientFactory(api), utcNow: () => now);
+    try
+    {
+        service.RunOnceAsync(dryRun: true).GetAwaiter().GetResult();
+        throw new InvalidOperationException("Network failure was swallowed.");
+    }
+    catch (HttpRequestException)
+    {
+        Assert(api.RefreshCalls == 0 && api.LoginCalls == 0, "Network failure triggered authentication.");
+    }
+}
+
+static void TestRoutingRejectsEmptySelection()
+{
+    var now = DateTimeOffset.UtcNow;
+    var api = new StubRoutingClient(now);
+    var settings = new PersistentAppSettings { KeySelectionInitialized = true, SelectedKeyIds = [] };
+    using var service = new RoutingService(settings, new PersistentCredentials { BearerToken = "synthetic-access" },
+        new MemoryRouteStateStore(), new StubRoutingClientFactory(api), utcNow: () => now);
+    try
+    {
+        service.RunOnceAsync(dryRun: true).GetAwaiter().GetResult();
+        throw new InvalidOperationException("Empty Key selection was accepted.");
+    }
+    catch (InvalidOperationException exception)
+    {
+        Assert(exception.Message.Contains("Key", StringComparison.OrdinalIgnoreCase),
+            "Empty selection did not produce a safe Key guidance error.");
+    }
+}
+
+static void TestSuccessfulRoutePersistsState()
+{
+    var now = DateTimeOffset.UtcNow;
+    var api = new StubRoutingClient(now);
+    var state = new MemoryRouteStateStore();
+    var settings = new PersistentAppSettings { KeySelectionInitialized = true, SelectedKeyIds = [10] };
+    using var service = new RoutingService(settings, new PersistentCredentials { BearerToken = "synthetic-access" },
+        state, new StubRoutingClientFactory(api), utcNow: () => now);
+    var result = service.RunOnceAsync().GetAwaiter().GetResult();
+    Assert(result.ChangedKeyCount == 1 && result.FailedKeyCount == 0, "Successful route update was not reported.");
+    Assert(state.Load().CurrentGroupId == 2, "Successful route did not persist target state.");
+}
+
+static void TestPartialFailureClearsState()
+{
+    var now = DateTimeOffset.UtcNow;
+    var api = new StubRoutingClient(now) { TwoKeys = true, FailUpdateCount = 1 };
+    var state = new MemoryRouteStateStore();
+    var settings = new PersistentAppSettings { KeySelectionInitialized = true, SelectedKeyIds = [10, 11] };
+    using var service = new RoutingService(settings, new PersistentCredentials { BearerToken = "synthetic-access" },
+        state, new StubRoutingClientFactory(api), utcNow: () => now);
+    var result = service.RunOnceAsync().GetAwaiter().GetResult();
+    Assert(result.FailedKeyCount == 1 && result.ChangedKeyCount == 1, "Partial Key failure was not reported per Key.");
+    Assert(state.Load().CurrentGroupId is null, "Partial Key failure retained route certainty.");
 }
 
 static void TestEncryptedSettingsRoundtrip()
@@ -869,5 +1007,131 @@ sealed class StubHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage
         CancellationToken cancellationToken)
     {
         return Task.FromResult(responder(request));
+    }
+}
+
+sealed class MemoryRouteStateStore : IRouteStateStore
+{
+    private RouteState _state = new();
+    public RouteState Load() => _state;
+    public void Save(RouteState state) => _state = state;
+}
+
+sealed class StubRoutingClientFactory(IAIHubApiClient client) : IAIHubClientFactory
+{
+    public IAIHubApiClient Create(string baseUrl, string? bearerToken, string? cookie, string? userAgent) => client;
+}
+
+sealed class StubRoutingClient(DateTimeOffset now) : IAIHubApiClient
+{
+    public int SummaryCalls { get; private set; }
+    public int GroupsCalls { get; private set; }
+    public int RatesCalls { get; private set; }
+    public int KeysCalls { get; private set; }
+    public int UpdateCalls { get; private set; }
+    public int RefreshCalls { get; private set; }
+    public int LoginCalls { get; private set; }
+    public bool FailFirstSummaryAuth { get; init; }
+    public bool ThrowNetwork { get; init; }
+    public bool TwoKeys { get; init; }
+    public int FailUpdateCount { get; init; }
+
+    public Task<MonitorSummary> GetProviderSummaryAsync(CancellationToken cancellationToken = default)
+    {
+        SummaryCalls++;
+        if (ThrowNetwork) throw new HttpRequestException("synthetic network failure");
+        if (FailFirstSummaryAuth && SummaryCalls == 1)
+            throw new AIHubApiException("Authentication required.", HttpStatusCode.Unauthorized, "401");
+        return Task.FromResult(new MonitorSummary
+        {
+            Apis = [ProviderForStub(2, now)]
+        });
+    }
+
+    public Task<JsonElement> ValidateLoginAsync(CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException();
+
+    public Task<AuthSession> LoginAsync(LoginCredentials credentials, CancellationToken cancellationToken = default)
+    {
+        LoginCalls++;
+        return Task.FromResult(new AuthSession("synthetic-login", "synthetic-refresh-login", now.AddHours(1)));
+    }
+
+    public Task<AuthSession> RefreshSessionAsync(string refreshToken, CancellationToken cancellationToken = default)
+    {
+        RefreshCalls++;
+        return Task.FromResult(new AuthSession("synthetic-refreshed", "synthetic-refresh-rotated", now.AddHours(1)));
+    }
+
+    public Task<IReadOnlyList<GroupInfo>> GetAvailableGroupsAsync(CancellationToken cancellationToken = default)
+    {
+        GroupsCalls++;
+        return Task.FromResult<IReadOnlyList<GroupInfo>>([GroupForStub(2)]);
+    }
+
+    public Task<IReadOnlyDictionary<long, double>> GetUserGroupRatesAsync(CancellationToken cancellationToken = default)
+    {
+        RatesCalls++;
+        return Task.FromResult<IReadOnlyDictionary<long, double>>(new Dictionary<long, double>());
+    }
+
+    public Task<IReadOnlyList<ApiKeyInfo>> GetAllKeysAsync(CancellationToken cancellationToken = default)
+    {
+        KeysCalls++;
+        var keys = new List<ApiKeyInfo>
+        {
+            new() { Id = 10, Name = "Synthetic Key 10", Status = "active", GroupId = 1 }
+        };
+        if (TwoKeys)
+        {
+            keys.Add(new ApiKeyInfo { Id = 11, Name = "Synthetic Key 11", Status = "active", GroupId = 1 });
+        }
+
+        return Task.FromResult<IReadOnlyList<ApiKeyInfo>>(keys);
+    }
+
+    public Task<ApiKeyInfo> UpdateKeyGroupAsync(long keyId, long groupId, CancellationToken cancellationToken = default)
+    {
+        UpdateCalls++;
+        if (UpdateCalls <= FailUpdateCount)
+        {
+            throw new InvalidOperationException("synthetic update failure");
+        }
+
+        return Task.FromResult(new ApiKeyInfo
+        {
+            Id = keyId,
+            Name = $"Synthetic Key {keyId}",
+            Status = "active",
+            GroupId = groupId,
+            Group = GroupForStub(groupId)
+        });
+    }
+
+    private static ProviderStatus ProviderForStub(long groupId, DateTimeOffset checkedAt) => new()
+    {
+        Id = $"provider-{groupId}",
+        GroupId = groupId,
+        PlanType = "Synthetic",
+        Platform = "openai",
+        PriceMultiplier = 0.01,
+        Available = true,
+        Enabled = true,
+        CheckedAt = checkedAt,
+        FirstTokenLatencyMs = 500,
+        SuccessRates = new Dictionary<string, double> { ["6h"] = 1 }
+    };
+
+    private static GroupInfo GroupForStub(long id) => new()
+    {
+        Id = id,
+        Name = $"Group {id}",
+        Platform = "openai",
+        RateMultiplier = 1,
+        Status = "active"
+    };
+
+    public void Dispose()
+    {
     }
 }
