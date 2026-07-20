@@ -35,6 +35,7 @@ var tests = new (string Name, Action Body)[]
     ("Explicit empty Key selection is rejected", TestRoutingRejectsEmptySelection),
     ("Successful updates persist target state", TestSuccessfulRoutePersistsState),
     ("Partial update failure clears route certainty", TestPartialFailureClearsState),
+    ("Audit log writes valid JSON and rotates safely", TestAuditLogWritesValidJsonAndRotates),
     ("Encrypted settings roundtrip", TestEncryptedSettingsRoundtrip),
     ("Usable access token is reused", TestUsableAccessTokenIsReused),
     ("Expired access token refreshes first", TestExpiredAccessTokenRefreshesFirst),
@@ -516,6 +517,48 @@ static void TestPartialFailureClearsState()
     var result = service.RunOnceAsync().GetAwaiter().GetResult();
     Assert(result.FailedKeyCount == 1 && result.ChangedKeyCount == 1, "Partial Key failure was not reported per Key.");
     Assert(state.Load().CurrentGroupId is null, "Partial Key failure retained route certainty.");
+}
+
+static void TestAuditLogWritesValidJsonAndRotates()
+{
+    var directory = Path.Combine(Path.GetTempPath(), "AIHubRouter.Tests", Guid.NewGuid().ToString("N"));
+    try
+    {
+        var path = Path.Combine(directory, "routing.jsonl");
+        var writer = new AuditLogWriter(path, maximumBytes: 512, retainedFiles: 2);
+        var entry = new RouteAuditEntry(
+            DateTimeOffset.UtcNow,
+            RoutingMode.Balanced,
+            RouteDecisionReason.FasterForWeightedTradeoff,
+            1,
+            2,
+            false,
+            [new RouteAuditCandidate(2, 0.02, 250, 0.4, true)],
+            [new RouteAuditKey(10, true, true, null)]);
+        writer.Write(entry);
+        writer.Write(entry);
+
+        Assert(File.Exists(path), "Audit log was not created.");
+        Assert(File.Exists(path + ".1"), "Audit log did not rotate at the configured size.");
+        foreach (var file in Directory.EnumerateFiles(directory))
+        {
+            foreach (var line in File.ReadLines(file))
+            {
+                using var document = JsonDocument.Parse(line);
+                Assert(document.RootElement.TryGetProperty("timestamp", out _), "Audit JSON omitted timestamp.");
+                Assert(!line.Contains("password", StringComparison.OrdinalIgnoreCase) &&
+                    !line.Contains("refresh", StringComparison.OrdinalIgnoreCase) &&
+                    !line.Contains("token", StringComparison.OrdinalIgnoreCase) &&
+                    !line.Contains("cookie", StringComparison.OrdinalIgnoreCase) &&
+                    !line.Contains("userAgent", StringComparison.OrdinalIgnoreCase),
+                    "Audit JSON contained a sensitive property name.");
+            }
+        }
+    }
+    finally
+    {
+        if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+    }
 }
 
 static void TestEncryptedSettingsRoundtrip()
