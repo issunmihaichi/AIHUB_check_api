@@ -21,6 +21,7 @@ var tests = new (string Name, Action Body)[]
     ("Refresh endpoint maps rotated session", TestRefreshEndpointMapsRotatedSession),
     ("Refresh keeps token when server omits rotation", TestRefreshKeepsTokenWhenServerOmitsRotation),
     ("Authentication error hides server message", TestAuthenticationErrorHidesServerMessage),
+    ("Business error hides server message", TestBusinessErrorHidesServerMessage),
     ("Interactive login requirement is rejected", TestInteractiveLoginRequirementIsRejected),
     ("Empty key selection roundtrips", TestEmptyKeySelectionRoundtrips),
     ("First key selection chooses first active key", TestFirstKeySelectionChoosesFirstActiveKey),
@@ -451,6 +452,25 @@ static void TestAuthenticationErrorHidesServerMessage()
     {
         Assert(exception.ApiCode == "invalid_grant", "Authentication error discarded the safe API code.");
         Assert(!exception.Message.Contains(sensitiveMessage, StringComparison.Ordinal), "Authentication error exposed the server message.");
+    }
+}
+
+static void TestBusinessErrorHidesServerMessage()
+{
+    const string sensitiveMessage = "synthetic-cookie=session-value synthetic-key=sk-secret";
+    var handler = new StubHttpMessageHandler(request => JsonResponse(
+        "{\"code\":\"500\",\"message\":\"" + sensitiveMessage + "\",\"data\":null}"));
+    using var client = new AIHubClient("https://example.test", messageHandler: handler);
+
+    try
+    {
+        client.GetAvailableGroupsAsync(CancellationToken.None).GetAwaiter().GetResult();
+        throw new InvalidOperationException("Rejected business response was accepted.");
+    }
+    catch (AIHubApiException exception)
+    {
+        Assert(exception.ApiCode == "500", "Business error discarded the API code.");
+        Assert(!exception.Message.Contains(sensitiveMessage, StringComparison.Ordinal), "Business error exposed the server message.");
     }
 }
 
