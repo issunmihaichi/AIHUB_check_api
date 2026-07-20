@@ -13,7 +13,10 @@ var tests = new (string Name, Action Body)[]
     ("Encrypted settings roundtrip", TestEncryptedSettingsRoundtrip),
     ("Usable access token is reused", TestUsableAccessTokenIsReused),
     ("Expired access token refreshes first", TestExpiredAccessTokenRefreshesFirst),
-    ("Rejected refresh falls back to login", TestRejectedRefreshFallsBackToLogin)
+    ("Rejected refresh falls back to login", TestRejectedRefreshFallsBackToLogin),
+    ("Login endpoint maps session", TestLoginEndpointMapsSession),
+    ("Refresh endpoint maps rotated session", TestRefreshEndpointMapsRotatedSession),
+    ("Interactive login requirement is rejected", TestInteractiveLoginRequirementIsRejected)
 };
 
 var failures = 0;
@@ -279,6 +282,88 @@ static void TestRejectedRefreshFallsBackToLogin()
     Assert(persistCalls == 1, "Login session was not persisted exactly once.");
 }
 
+static void TestLoginEndpointMapsSession()
+{
+    var now = new DateTimeOffset(2026, 7, 20, 9, 0, 0, TimeSpan.Zero);
+    var handler = new StubHttpMessageHandler(request =>
+    {
+        Assert(request.Method == HttpMethod.Post, "Login did not use POST.");
+        Assert(request.RequestUri?.AbsolutePath == "/api/v1/auth/login", "Login used the wrong endpoint.");
+        var body = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+        Assert(body.Contains("user@example.test", StringComparison.Ordinal), "Login request omitted the email.");
+        Assert(body.Contains("synthetic-password", StringComparison.Ordinal), "Login request omitted the password.");
+        return JsonResponse("""
+            {"code":0,"message":"ok","data":{"access_token":"access-login","refresh_token":"refresh-login","expires_in":3600,"token_type":"Bearer","user":{"email":"user@example.test"}}}
+            """);
+    });
+    using var client = new AIHubClient(
+        "https://example.test",
+        messageHandler: handler,
+        utcNow: () => now);
+
+    var session = client.LoginAsync(
+        new LoginCredentials("user@example.test", "synthetic-password"),
+        CancellationToken.None).GetAwaiter().GetResult();
+
+    Assert(session.AccessToken == "access-login", "Login access token was not mapped.");
+    Assert(session.RefreshToken == "refresh-login", "Login refresh token was not mapped.");
+    Assert(session.ExpiresAt == now.AddSeconds(3600), "Login expiration was not converted to an absolute time.");
+}
+
+static void TestRefreshEndpointMapsRotatedSession()
+{
+    var now = new DateTimeOffset(2026, 7, 20, 10, 0, 0, TimeSpan.Zero);
+    var handler = new StubHttpMessageHandler(request =>
+    {
+        Assert(request.RequestUri?.AbsolutePath == "/api/v1/auth/refresh", "Refresh used the wrong endpoint.");
+        var body = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+        Assert(body.Contains("refresh-old", StringComparison.Ordinal), "Refresh request omitted the refresh token.");
+        return JsonResponse("""
+            {"code":0,"message":"ok","data":{"access_token":"access-new","refresh_token":"refresh-new","expires_in":1800,"token_type":"Bearer"}}
+            """);
+    });
+    using var client = new AIHubClient(
+        "https://example.test",
+        messageHandler: handler,
+        utcNow: () => now);
+
+    var session = client.RefreshSessionAsync("refresh-old", CancellationToken.None).GetAwaiter().GetResult();
+
+    Assert(session.AccessToken == "access-new", "Refreshed access token was not mapped.");
+    Assert(session.RefreshToken == "refresh-new", "Rotated refresh token was not mapped.");
+    Assert(session.ExpiresAt == now.AddSeconds(1800), "Refresh expiration was not converted to an absolute time.");
+}
+
+static void TestInteractiveLoginRequirementIsRejected()
+{
+    const string temporaryToken = "temporary-two-factor-token-must-not-leak";
+    var responseJson = "{\"code\":0,\"message\":\"ok\",\"data\":{\"requires_2fa\":true,\"temp_token\":\"" +
+        temporaryToken +
+        "\",\"user_email_masked\":\"u***@example.test\"}}";
+    var handler = new StubHttpMessageHandler(request => JsonResponse(responseJson));
+    using var client = new AIHubClient("https://example.test", messageHandler: handler);
+
+    try
+    {
+        client.LoginAsync(
+            new LoginCredentials("user@example.test", "synthetic-password"),
+            CancellationToken.None).GetAwaiter().GetResult();
+        throw new InvalidOperationException("Interactive authentication response was accepted.");
+    }
+    catch (InteractiveAuthenticationRequiredException exception)
+    {
+        Assert(!exception.Message.Contains(temporaryToken, StringComparison.Ordinal), "Interactive auth error leaked the temporary token.");
+    }
+}
+
+static HttpResponseMessage JsonResponse(string json)
+{
+    return new HttpResponseMessage(HttpStatusCode.OK)
+    {
+        Content = new StringContent(json, Encoding.UTF8, "application/json")
+    };
+}
+
 static ProviderStatus Provider(long groupId, double rate, bool available, double success, DateTimeOffset checkedAt)
 {
     return new ProviderStatus
@@ -315,5 +400,15 @@ static void Assert(bool condition, string message)
     if (!condition)
     {
         throw new InvalidOperationException(message);
+    }
+}
+
+sealed class StubHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> responder) : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+        return Task.FromResult(responder(request));
     }
 }

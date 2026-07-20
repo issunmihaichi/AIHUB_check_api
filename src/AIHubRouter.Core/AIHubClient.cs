@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace AIHubRouter.Core;
 
@@ -17,25 +18,29 @@ public sealed class AIHubClient : IDisposable
     private readonly string _bearerToken;
     private readonly string _cookie;
     private readonly string _userAgent;
+    private readonly Func<DateTimeOffset> _utcNow;
 
     public AIHubClient(
         string baseUrl,
         string? bearerToken = null,
         string? cookie = null,
         string? userAgent = null,
-        TimeSpan? timeout = null)
+        TimeSpan? timeout = null,
+        HttpMessageHandler? messageHandler = null,
+        Func<DateTimeOffset>? utcNow = null)
     {
         _origin = NormalizeOrigin(baseUrl);
         _bearerToken = CredentialParser.NormalizeBearerToken(bearerToken);
         _cookie = CredentialParser.NormalizeCookie(cookie);
         _userAgent = CredentialParser.NormalizeUserAgent(userAgent);
+        _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
 
         if (string.IsNullOrEmpty(_bearerToken))
         {
             _bearerToken = CredentialParser.TryExtractTokenFromCookie(_cookie);
         }
 
-        var handler = new HttpClientHandler
+        HttpMessageHandler handler = messageHandler ?? new HttpClientHandler
         {
             AutomaticDecompression = DecompressionMethods.All,
             AllowAutoRedirect = true,
@@ -56,6 +61,41 @@ public sealed class AIHubClient : IDisposable
     public async Task<JsonElement> ValidateLoginAsync(CancellationToken cancellationToken = default)
     {
         return await SendAsync<JsonElement>(HttpMethod.Get, "/api/v1/auth/me", null, cancellationToken);
+    }
+
+    public async Task<AuthSession> LoginAsync(
+        LoginCredentials credentials,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(credentials);
+        if (!credentials.IsComplete)
+        {
+            throw new ArgumentException("登录邮箱和密码不能为空。", nameof(credentials));
+        }
+
+        var response = await SendAsync<AuthTokenResponse>(
+            HttpMethod.Post,
+            "/api/v1/auth/login",
+            new { email = credentials.Email.Trim(), password = credentials.Password },
+            cancellationToken);
+        return CreateSession(response);
+    }
+
+    public async Task<AuthSession> RefreshSessionAsync(
+        string refreshToken,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(refreshToken))
+        {
+            throw new ArgumentException("Refresh token 不能为空。", nameof(refreshToken));
+        }
+
+        var response = await SendAsync<AuthTokenResponse>(
+            HttpMethod.Post,
+            "/api/v1/auth/refresh",
+            new { refresh_token = refreshToken },
+            cancellationToken);
+        return CreateSession(response);
     }
 
     public async Task<IReadOnlyList<GroupInfo>> GetAvailableGroupsAsync(CancellationToken cancellationToken = default)
@@ -258,5 +298,38 @@ public sealed class AIHubClient : IDisposable
         }
 
         return new Uri(uri.GetLeftPart(UriPartial.Authority) + "/", UriKind.Absolute);
+    }
+
+    private AuthSession CreateSession(AuthTokenResponse response)
+    {
+        if (response.RequiresTwoFactor)
+        {
+            throw new InteractiveAuthenticationRequiredException();
+        }
+
+        if (string.IsNullOrWhiteSpace(response.AccessToken))
+        {
+            throw new AIHubApiException("认证响应缺少 access token。");
+        }
+
+        return new AuthSession(
+            response.AccessToken,
+            response.RefreshToken ?? string.Empty,
+            _utcNow().AddSeconds(Math.Max(response.ExpiresIn, 0)));
+    }
+
+    private sealed class AuthTokenResponse
+    {
+        [JsonPropertyName("access_token")]
+        public string? AccessToken { get; init; }
+
+        [JsonPropertyName("refresh_token")]
+        public string? RefreshToken { get; init; }
+
+        [JsonPropertyName("expires_in")]
+        public int ExpiresIn { get; init; }
+
+        [JsonPropertyName("requires_2fa")]
+        public bool RequiresTwoFactor { get; init; }
     }
 }
