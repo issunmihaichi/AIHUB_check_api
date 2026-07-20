@@ -1,4 +1,5 @@
 using AIHubRouter.Core;
+using System.Net;
 using System.Text;
 
 var tests = new (string Name, Action Body)[]
@@ -9,7 +10,10 @@ var tests = new (string Name, Action Body)[]
     ("User rate override", TestUserRateOverride),
     ("Availability threshold", TestAvailabilityThreshold),
     ("Stale status rejection", TestStaleStatusRejection),
-    ("Encrypted settings roundtrip", TestEncryptedSettingsRoundtrip)
+    ("Encrypted settings roundtrip", TestEncryptedSettingsRoundtrip),
+    ("Usable access token is reused", TestUsableAccessTokenIsReused),
+    ("Expired access token refreshes first", TestExpiredAccessTokenRefreshesFirst),
+    ("Rejected refresh falls back to login", TestRejectedRefreshFallsBackToLogin)
 };
 
 var failures = 0;
@@ -161,6 +165,118 @@ static void TestEncryptedSettingsRoundtrip()
             Directory.Delete(directory, recursive: true);
         }
     }
+}
+
+static void TestUsableAccessTokenIsReused()
+{
+    var now = new DateTimeOffset(2026, 7, 20, 8, 0, 0, TimeSpan.Zero);
+    var refreshCalls = 0;
+    var loginCalls = 0;
+    var persistCalls = 0;
+    var existing = new AuthSession("access-current", "refresh-current", now.AddMinutes(10));
+    var coordinator = new SessionCoordinator(
+        (refreshToken, cancellationToken) =>
+        {
+            refreshCalls++;
+            return Task.FromResult(new AuthSession("access-refreshed", "refresh-refreshed", now.AddHours(1)));
+        },
+        (credentials, cancellationToken) =>
+        {
+            loginCalls++;
+            return Task.FromResult(new AuthSession("access-login", "refresh-login", now.AddHours(1)));
+        },
+        (session, cancellationToken) =>
+        {
+            persistCalls++;
+            return Task.CompletedTask;
+        },
+        () => now);
+
+    var result = coordinator.GetSessionAsync(
+        existing,
+        new LoginCredentials("user@example.test", "password"),
+        CancellationToken.None).GetAwaiter().GetResult();
+
+    Assert(ReferenceEquals(result, existing), "Coordinator did not reuse the current session instance.");
+    Assert(refreshCalls == 0, "Refresh was called for a usable access token.");
+    Assert(loginCalls == 0, "Login was called for a usable access token.");
+    Assert(persistCalls == 0, "Unchanged session was persisted unnecessarily.");
+}
+
+static void TestExpiredAccessTokenRefreshesFirst()
+{
+    var now = new DateTimeOffset(2026, 7, 20, 8, 0, 0, TimeSpan.Zero);
+    var refreshCalls = 0;
+    var loginCalls = 0;
+    AuthSession? persisted = null;
+    var refreshed = new AuthSession("access-refreshed", "refresh-rotated", now.AddHours(1));
+    var coordinator = new SessionCoordinator(
+        (refreshToken, cancellationToken) =>
+        {
+            refreshCalls++;
+            Assert(refreshToken == "refresh-current", "Coordinator passed the wrong refresh token.");
+            return Task.FromResult(refreshed);
+        },
+        (credentials, cancellationToken) =>
+        {
+            loginCalls++;
+            return Task.FromResult(new AuthSession("access-login", "refresh-login", now.AddHours(1)));
+        },
+        (session, cancellationToken) =>
+        {
+            persisted = session;
+            return Task.CompletedTask;
+        },
+        () => now);
+
+    var result = coordinator.GetSessionAsync(
+        new AuthSession("access-expired", "refresh-current", now.AddSeconds(-1)),
+        new LoginCredentials("user@example.test", "password"),
+        CancellationToken.None).GetAwaiter().GetResult();
+
+    Assert(ReferenceEquals(result, refreshed), "Coordinator did not return the refreshed session.");
+    Assert(refreshCalls == 1, "Refresh was not called exactly once.");
+    Assert(loginCalls == 0, "Login was called after a successful refresh.");
+    Assert(ReferenceEquals(persisted, refreshed), "Rotated refresh token was not persisted.");
+}
+
+static void TestRejectedRefreshFallsBackToLogin()
+{
+    var now = new DateTimeOffset(2026, 7, 20, 8, 0, 0, TimeSpan.Zero);
+    var refreshCalls = 0;
+    var loginCalls = 0;
+    var persistCalls = 0;
+    var loggedIn = new AuthSession("access-login", "refresh-login", now.AddHours(1));
+    var coordinator = new SessionCoordinator(
+        (refreshToken, cancellationToken) =>
+        {
+            refreshCalls++;
+            throw new AIHubApiException("Refresh rejected.", HttpStatusCode.Unauthorized, "INVALID_TOKEN");
+        },
+        (credentials, cancellationToken) =>
+        {
+            loginCalls++;
+            Assert(credentials.Email == "user@example.test", "Coordinator passed the wrong email.");
+            Assert(credentials.Password == "password", "Coordinator passed the wrong password.");
+            return Task.FromResult(loggedIn);
+        },
+        (session, cancellationToken) =>
+        {
+            persistCalls++;
+            Assert(ReferenceEquals(session, loggedIn), "Coordinator persisted the rejected session.");
+            return Task.CompletedTask;
+        },
+        () => now);
+
+    var result = coordinator.GetSessionAsync(
+        new AuthSession("access-expired", "refresh-rejected", now.AddMinutes(-5)),
+        new LoginCredentials("user@example.test", "password"),
+        CancellationToken.None).GetAwaiter().GetResult();
+
+    Assert(ReferenceEquals(result, loggedIn), "Coordinator did not return the login session.");
+    Assert(refreshCalls == 1, "Rejected refresh was not attempted exactly once.");
+    Assert(loginCalls == 1, "Login fallback was not attempted exactly once.");
+    Assert(persistCalls == 1, "Login session was not persisted exactly once.");
 }
 
 static ProviderStatus Provider(long groupId, double rate, bool available, double success, DateTimeOffset checkedAt)
