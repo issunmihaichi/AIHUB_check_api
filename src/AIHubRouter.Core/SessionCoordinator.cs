@@ -1,7 +1,5 @@
 namespace AIHubRouter.Core;
 
-using System.Net;
-
 public sealed class SessionCoordinator
 {
     private static readonly TimeSpan RenewalMargin = TimeSpan.FromMinutes(2);
@@ -58,6 +56,6 @@ public sealed class SessionCoordinator
 
     private static bool IsRefreshRejected(AIHubApiException exception)
     {
-        return exception.StatusCode is HttpStatusCode.BadRequest or HttpStatusCode.Unauthorized;
+        return exception.IsRefreshRejection;
     }
 }

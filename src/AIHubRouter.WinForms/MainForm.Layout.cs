@@ -13,6 +13,7 @@ internal sealed partial class MainForm
     private readonly CheckBox _showCredentialsCheck = new() { Text = "显示凭据", AutoSize = true };
     private readonly CheckBox _advancedAuthenticationCheck = new() { Text = "展开高级认证（Token / Cookie / UA）", AutoSize = true };
     private readonly TableLayoutPanel _advancedAuthenticationPanel = new();
+    private readonly RowStyle _credentialPanelRowStyle = new(SizeType.Absolute, 270);
     private readonly Button _authGuideButton = new() { Text = "认证向导", AutoSize = true, Width = 132 };
     private readonly Button _openLoginButton = new() { Text = "打开登录页", AutoSize = true, Width = 132 };
     private readonly Button _pasteTokenButton = new() { Text = "粘贴", AutoSize = true };
@@ -80,7 +81,7 @@ internal sealed partial class MainForm
             RowCount = 3,
             BackColor = BackColor
         };
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 340));
+        root.RowStyles.Add(_credentialPanelRowStyle);
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
@@ -214,6 +215,7 @@ internal sealed partial class MainForm
             ? "收起高级认证（Token / Cookie / UA）"
             : "展开高级认证（Token / Cookie / UA）";
         _advancedAuthenticationPanel.Visible = expanded;
+        _credentialPanelRowStyle.Height = expanded ? 380 : 270;
         if (_advancedAuthenticationPanel.Parent is TableLayoutPanel table)
         {
             table.RowStyles[5].Height = expanded ? 108 : 0;

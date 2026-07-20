@@ -14,9 +14,13 @@ var tests = new (string Name, Action Body)[]
     ("Usable access token is reused", TestUsableAccessTokenIsReused),
     ("Expired access token refreshes first", TestExpiredAccessTokenRefreshesFirst),
     ("Rejected refresh falls back to login", TestRejectedRefreshFallsBackToLogin),
+    ("Refresh API code falls back to login", TestRefreshApiCodeFallsBackToLogin),
+    ("Refresh network failure does not log in", TestRefreshNetworkFailureDoesNotLogIn),
+    ("Authentication API code is classified", TestAuthenticationApiCodeIsClassified),
     ("Login endpoint maps session", TestLoginEndpointMapsSession),
     ("Refresh endpoint maps rotated session", TestRefreshEndpointMapsRotatedSession),
     ("Refresh keeps token when server omits rotation", TestRefreshKeepsTokenWhenServerOmitsRotation),
+    ("Authentication error hides server message", TestAuthenticationErrorHidesServerMessage),
     ("Interactive login requirement is rejected", TestInteractiveLoginRequirementIsRejected),
     ("Empty key selection roundtrips", TestEmptyKeySelectionRoundtrips),
     ("First key selection chooses first active key", TestFirstKeySelectionChoosesFirstActiveKey),
@@ -166,6 +170,13 @@ static void TestEncryptedSettingsRoundtrip()
         Assert(!encryptedText.Contains(credentials.RefreshToken, StringComparison.Ordinal), "Credential file contains plaintext refresh token.");
         Assert(!encryptedText.Contains(credentials.Password, StringComparison.Ordinal), "Credential file contains plaintext password.");
         Assert(!encryptedText.Contains(credentials.Email, StringComparison.Ordinal), "Credential file contains plaintext email.");
+        Assert(!encryptedText.Contains(credentials.Cookie, StringComparison.Ordinal), "Credential file contains plaintext Cookie.");
+        Assert(!encryptedText.Contains(credentials.UserAgent, StringComparison.Ordinal), "Credential file contains plaintext User-Agent.");
+        var settingsText = File.ReadAllText(Path.Combine(directory, "settings.json"));
+        Assert(!settingsText.Contains(credentials.Email, StringComparison.Ordinal), "Plain settings contain the login email.");
+        Assert(!settingsText.Contains(credentials.Password, StringComparison.Ordinal), "Plain settings contain the password.");
+        Assert(!settingsText.Contains(secretToken, StringComparison.Ordinal), "Plain settings contain the access token.");
+        Assert(!settingsText.Contains(credentials.RefreshToken, StringComparison.Ordinal), "Plain settings contain the refresh token.");
 
         var loaded = store.Load();
         Assert(loaded.Settings.PersistCredentials, "Persistence flag was not restored.");
@@ -303,6 +314,63 @@ static void TestRejectedRefreshFallsBackToLogin()
     Assert(persistCalls == 1, "Login session was not persisted exactly once.");
 }
 
+static void TestRefreshApiCodeFallsBackToLogin()
+{
+    var handler = new StubHttpMessageHandler(request => JsonResponse("""
+        {"code":"invalid_grant","message":"refresh rejected","data":null}
+        """));
+    using var client = new AIHubClient("https://example.test", messageHandler: handler);
+    var loginCalls = 0;
+    var coordinator = new SessionCoordinator(
+        client.RefreshSessionAsync,
+        (credentials, cancellationToken) =>
+        {
+            loginCalls++;
+            return Task.FromResult(new AuthSession("access-login", "refresh-login", DateTimeOffset.UtcNow.AddHours(1)));
+        },
+        (session, cancellationToken) => Task.CompletedTask);
+
+    var session = coordinator.GetSessionAsync(
+        new AuthSession("access-expired", "refresh-rejected", DateTimeOffset.MinValue),
+        new LoginCredentials("user@example.test", "password"),
+        CancellationToken.None).GetAwaiter().GetResult();
+
+    Assert(loginCalls == 1, "HTTP 200 invalid_grant did not trigger login fallback.");
+    Assert(session.AccessToken == "access-login", "Login fallback session was not returned.");
+}
+
+static void TestAuthenticationApiCodeIsClassified()
+{
+    var exception = new AIHubApiException("Synthetic auth failure.", HttpStatusCode.OK, "401");
+    Assert(exception.IsAuthenticationFailure, "API code 401 was not classified as an authentication failure.");
+}
+
+static void TestRefreshNetworkFailureDoesNotLogIn()
+{
+    var loginCalls = 0;
+    var coordinator = new SessionCoordinator(
+        (refreshToken, cancellationToken) => throw new HttpRequestException("Synthetic network failure."),
+        (credentials, cancellationToken) =>
+        {
+            loginCalls++;
+            return Task.FromResult(new AuthSession("access-login", "refresh-login", DateTimeOffset.UtcNow.AddHours(1)));
+        },
+        (session, cancellationToken) => Task.CompletedTask);
+
+    try
+    {
+        coordinator.GetSessionAsync(
+            new AuthSession("access-expired", "refresh-current", DateTimeOffset.MinValue),
+            new LoginCredentials("user@example.test", "password"),
+            CancellationToken.None).GetAwaiter().GetResult();
+        throw new InvalidOperationException("Network failure was swallowed.");
+    }
+    catch (HttpRequestException)
+    {
+        Assert(loginCalls == 0, "Network failure incorrectly triggered password login.");
+    }
+}
+
 static void TestLoginEndpointMapsSession()
 {
     var now = new DateTimeOffset(2026, 7, 20, 9, 0, 0, TimeSpan.Zero);
@@ -365,6 +433,25 @@ static void TestRefreshKeepsTokenWhenServerOmitsRotation()
     var session = client.RefreshSessionAsync("refresh-current", CancellationToken.None).GetAwaiter().GetResult();
 
     Assert(session.RefreshToken == "refresh-current", "Refresh discarded the existing token when no rotation was returned.");
+}
+
+static void TestAuthenticationErrorHidesServerMessage()
+{
+    const string sensitiveMessage = "synthetic-email@example.test synthetic-temporary-token";
+    var handler = new StubHttpMessageHandler(request => JsonResponse(
+        "{\"code\":\"invalid_grant\",\"message\":\"" + sensitiveMessage + "\",\"data\":null}"));
+    using var client = new AIHubClient("https://example.test", messageHandler: handler);
+
+    try
+    {
+        client.RefreshSessionAsync("refresh-current", CancellationToken.None).GetAwaiter().GetResult();
+        throw new InvalidOperationException("Rejected refresh was accepted.");
+    }
+    catch (AIHubApiException exception)
+    {
+        Assert(exception.ApiCode == "invalid_grant", "Authentication error discarded the safe API code.");
+        Assert(!exception.Message.Contains(sensitiveMessage, StringComparison.Ordinal), "Authentication error exposed the server message.");
+    }
 }
 
 static void TestInteractiveLoginRequirementIsRejected()

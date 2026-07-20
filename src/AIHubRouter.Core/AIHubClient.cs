@@ -163,6 +163,7 @@ public sealed class AIHubClient : IDisposable
         object? payload,
         CancellationToken cancellationToken)
     {
+        var includeServerMessage = !path.StartsWith("/api/v1/auth/", StringComparison.OrdinalIgnoreCase);
         using var request = new HttpRequestMessage(method, new Uri(_origin, path));
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         request.Headers.AcceptLanguage.ParseAdd("zh-CN,zh;q=0.9,en;q=0.7");
@@ -211,7 +212,7 @@ public sealed class AIHubClient : IDisposable
         {
             if (!response.IsSuccessStatusCode)
             {
-                throw CreateApiException(response.StatusCode, document?.RootElement);
+                throw CreateApiException(response.StatusCode, document?.RootElement, includeServerMessage);
             }
 
             if (document is null)
@@ -225,7 +226,7 @@ public sealed class AIHubClient : IDisposable
                 var code = ReadCode(codeElement);
                 if (code != "0")
                 {
-                    throw CreateApiException(response.StatusCode, root);
+                    throw CreateApiException(response.StatusCode, root, includeServerMessage);
                 }
 
                 if (!root.TryGetProperty("data", out root))
@@ -251,20 +252,27 @@ public sealed class AIHubClient : IDisposable
         }
     }
 
-    private static AIHubApiException CreateApiException(HttpStatusCode statusCode, JsonElement? root)
+    private static AIHubApiException CreateApiException(
+        HttpStatusCode statusCode,
+        JsonElement? root,
+        bool includeServerMessage)
     {
-        var message = statusCode switch
-        {
-            HttpStatusCode.Unauthorized => "认证失败，请检查登录 Token、Cookie 和浏览器 User-Agent。",
-            HttpStatusCode.Forbidden => "当前账号没有执行该操作的权限。",
-            HttpStatusCode.TooManyRequests => "请求过于频繁，请稍后重试。",
-            _ => $"AIHub 请求失败（HTTP {(int)statusCode}）。"
-        };
+        var message = includeServerMessage
+            ? statusCode switch
+            {
+                HttpStatusCode.Unauthorized => "认证失败，请检查登录 Token、Cookie 和浏览器 User-Agent。",
+                HttpStatusCode.Forbidden => "当前账号没有执行该操作的权限。",
+                HttpStatusCode.TooManyRequests => "请求过于频繁，请稍后重试。",
+                _ => $"AIHub 请求失败（HTTP {(int)statusCode}）。"
+            }
+            : "认证请求被服务器拒绝。";
         string? apiCode = null;
 
         if (root is { ValueKind: JsonValueKind.Object } value)
         {
-            if (value.TryGetProperty("message", out var messageElement) && messageElement.ValueKind == JsonValueKind.String)
+            if (includeServerMessage &&
+                value.TryGetProperty("message", out var messageElement) &&
+                messageElement.ValueKind == JsonValueKind.String)
             {
                 var serverMessage = messageElement.GetString();
                 if (!string.IsNullOrWhiteSpace(serverMessage))

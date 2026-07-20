@@ -66,7 +66,7 @@ dotnet run --project .\src\AIHubRouter.WinForms\AIHubRouter.WinForms.csproj --no
 .\scripts\publish.ps1
 ```
 
-发布脚本会先扫描生产源码，再生成并扫描未压缩程序集和两个 EXE。扫描会阻止凭据形态的 JWT、Bearer/API Key、Cookie、邮箱和本机用户路径进入官方包；每个输出目录会先清空，最终只允许包含 `AIHubRouter.exe`。
+发布脚本会先扫描生产源码，再在临时 staging 目录生成并扫描未压缩程序集和两个 EXE。扫描会阻止凭据形态的 JWT、Bearer/API Key、Cookie、邮箱和本机用户路径进入官方包；候选目录最终只允许包含 `AIHubRouter.exe`。所有检查通过后才替换正式目录，失败时保留上一次已验证版本并清理 staging。
 
 发布脚本会生成两个版本：
 

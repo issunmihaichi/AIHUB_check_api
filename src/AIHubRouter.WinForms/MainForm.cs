@@ -1,7 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
-using System.Net;
 using System.Text.Json;
 using AIHubRouter.Core;
 
@@ -221,7 +220,7 @@ internal sealed partial class MainForm : Form
             }
             catch (Exception exception)
             {
-                if (exception is AIHubApiException { StatusCode: HttpStatusCode.Unauthorized })
+                if (exception is AIHubApiException { IsAuthenticationFailure: true })
                 {
                     throw;
                 }
@@ -680,7 +679,7 @@ internal sealed partial class MainForm : Form
                 return;
             }
             catch (AIHubApiException exception)
-                when (exception.StatusCode == HttpStatusCode.Unauthorized &&
+                when (exception.IsAuthenticationFailure &&
                     attempt == 0 &&
                     CanRenewAutomatically())
             {
@@ -732,7 +731,7 @@ internal sealed partial class MainForm : Form
         }
 
         var message = GetSafeErrorMessage(exception);
-        if (_autoRouteCheck.Checked && exception is AIHubApiException { StatusCode: HttpStatusCode.Unauthorized })
+        if (_autoRouteCheck.Checked && exception is AIHubApiException { IsAuthenticationFailure: true })
         {
             _autoRouteCheck.Checked = false;
         }

@@ -120,7 +120,7 @@ $rules = @(
     @{ Name = "BearerValue"; Pattern = '(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{20,}' },
     @{ Name = "ApiKeyValue"; Pattern = '(?i)\b(?:sk|ak)-[A-Za-z0-9_-]{16,}\b' },
     @{ Name = "CookieCredential"; Pattern = '(?i)\b(?:auth_token|access_token|refresh_token|session|sessionid)\s*=\s*[A-Za-z0-9%._~+/=-]{20,}' },
-    @{ Name = "SecretAssignment"; Pattern = '(?i)\b(?:password|passwd|access[_-]?token|refresh[_-]?token|api[_-]?key|cookie)\b\s*[:=]\s*["''][^"''\r\n]{8,}["'']' },
+    @{ Name = "SecretAssignment"; Pattern = '(?i)["'']?\b(?:password|passwd|access[_-]?token|refresh[_-]?token|api[_-]?key|cookie)\b["'']?\s*[:=]\s*["''][^"''\r\n]{8,}["'']' },
     @{ Name = "LocalUserPath"; Pattern = '(?i)\b[A-Z]:[\\/]Users[\\/][^\\/:*?"<>|\r\n]+' }
 )
 $emailPattern = '(?i)\b[A-Z0-9._%+-]+@(?:[A-Z0-9-]+\.)+[A-Z]{2,}\b'
