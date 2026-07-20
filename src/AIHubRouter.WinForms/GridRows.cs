@@ -12,6 +12,8 @@ internal sealed class ProviderGridRow
     public string Platform => Source.Platform;
     public string PublicRate => Source.PriceMultiplier.ToString("0.####");
     public string EffectiveRate { get; init; } = "-";
+    public string WeightedScore { get; init; } = "-";
+    public string DecisionState { get; init; } = string.Empty;
     public string State { get; init; } = string.Empty;
     public string Success6h => Source.SuccessRate6h is { } rate ? $"{rate:P1}" : "-";
     public string FirstToken => Source.FirstTokenLatencyMs is { } latency ? $"{latency:0} ms" : "-";

@@ -51,6 +51,13 @@ function Invoke-ReleaseScan([string[]]$targets) {
     }
 }
 
+function Invoke-DotNet([string[]]$Arguments) {
+    & dotnet @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "dotnet command failed with exit code $LASTEXITCODE."
+    }
+}
+
 function Assert-SingleExecutable([string]$directory, [string]$expectedExecutable) {
     $unexpectedFiles = @(
         Get-ChildItem -LiteralPath $directory -Recurse -File |
@@ -129,31 +136,49 @@ $liteStage = Join-Path $stagingRoot "lite"
 New-Item -ItemType Directory -Path $portableStage, $liteStage -Force | Out-Null
 
 try {
-    dotnet restore (Join-Path $repoRoot "AIHubRouter.sln") --configfile $configFile
-    dotnet run --project (Join-Path $repoRoot "tests\AIHubRouter.Core.Tests\AIHubRouter.Core.Tests.csproj") --no-restore -c Release
-    dotnet restore (Join-Path $repoRoot "src\AIHubRouter.WinForms\AIHubRouter.WinForms.csproj") `
-        --configfile $configFile `
-        -r $Runtime
-    dotnet publish (Join-Path $repoRoot "src\AIHubRouter.WinForms\AIHubRouter.WinForms.csproj") `
-        --no-restore `
-        -c Release `
-        -r $Runtime `
-        --self-contained true `
-        -p:PublishSingleFile=true `
-        -p:EnableCompressionInSingleFile=true `
-        -p:DebugType=None `
-        -p:DebugSymbols=false `
-        -o $portableStage
+    Invoke-DotNet @(
+        "restore",
+        (Join-Path $repoRoot "AIHubRouter.sln"),
+        "--configfile", $configFile
+    )
+    Invoke-DotNet @(
+        "run",
+        "--project", (Join-Path $repoRoot "tests\AIHubRouter.Core.Tests\AIHubRouter.Core.Tests.csproj"),
+        "--no-restore",
+        "-c", "Release"
+    )
+    Invoke-DotNet @(
+        "restore",
+        (Join-Path $repoRoot "src\AIHubRouter.WinForms\AIHubRouter.WinForms.csproj"),
+        "--configfile", $configFile,
+        "-r", $Runtime
+    )
+    Invoke-DotNet @(
+        "publish",
+        (Join-Path $repoRoot "src\AIHubRouter.WinForms\AIHubRouter.WinForms.csproj"),
+        "--no-restore",
+        "-c", "Release",
+        "-r", $Runtime,
+        "--self-contained", "true",
+        "-p:PublishSingleFile=true",
+        "-p:EnableCompressionInSingleFile=true",
+        "-p:DebugType=None",
+        "-p:DebugSymbols=false",
+        "-o", $portableStage
+    )
 
-    dotnet publish (Join-Path $repoRoot "src\AIHubRouter.WinForms\AIHubRouter.WinForms.csproj") `
-        --no-restore `
-        -c Release `
-        -r $Runtime `
-        --self-contained false `
-        -p:PublishSingleFile=true `
-        -p:DebugType=None `
-        -p:DebugSymbols=false `
-        -o $liteStage
+    Invoke-DotNet @(
+        "publish",
+        (Join-Path $repoRoot "src\AIHubRouter.WinForms\AIHubRouter.WinForms.csproj"),
+        "--no-restore",
+        "-c", "Release",
+        "-r", $Runtime,
+        "--self-contained", "false",
+        "-p:PublishSingleFile=true",
+        "-p:DebugType=None",
+        "-p:DebugSymbols=false",
+        "-o", $liteStage
+    )
 
     $portableStageExe = Join-Path $portableStage "AIHubRouter.exe"
     $liteStageExe = Join-Path $liteStage "AIHubRouter.exe"

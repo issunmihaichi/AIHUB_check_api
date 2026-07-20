@@ -15,8 +15,12 @@ internal sealed partial class MainForm : Form
     private bool _hasLoadedKeys;
     private bool _keySelectionInitialized;
     private bool _applyingKeys;
+    private bool _applyingSessionCredentials;
     private HashSet<long> _savedSelectedKeyIds = [];
     private AuthSession? _currentSession;
+    private RoutingService? _routingService;
+    private RouteEvaluation? _lastEvaluation;
+    private WinFormsTheme _themePreference = WinFormsTheme.System;
     private MonitorSummary? _summary;
     private IReadOnlyList<GroupInfo> _groups = [];
     private IReadOnlyDictionary<long, double> _userRates = new Dictionary<long, double>();
@@ -26,6 +30,7 @@ internal sealed partial class MainForm : Form
     {
         InitializeUi();
         LoadSavedSettings();
+        ApplySelectedTheme();
         WireEvents();
         ApplySmoothRendering(showStatus: false);
     }
@@ -45,6 +50,7 @@ internal sealed partial class MainForm : Form
             }
 
             _autoTimer.Stop();
+            _routingService?.Dispose();
             _shutdown.Cancel();
             _toolTip.Dispose();
         };
@@ -57,18 +63,63 @@ internal sealed partial class MainForm : Form
         _saveSettingsButton.Click += (_, _) => SaveCurrentSettings(showStatus: true);
         _persistCredentialsCheck.CheckedChanged += (_, _) => HandlePersistenceChanged();
         _validateButton.Click += async (_, _) => await ValidateAuthenticationAsync();
-        _refreshButton.Click += async (_, _) => await RefreshDataAsync(loadAccountData: HasCredentials());
+        _refreshButton.Click += async (_, _) =>
+        {
+            if (HasCredentials())
+            {
+                await ExecuteRoutingCycleAsync(dryRun: true, forceAccountRefresh: true);
+            }
+            else
+            {
+                await RefreshDataAsync(loadAccountData: false);
+            }
+        };
+        _simulateButton.Click += async (_, _) => await ExecuteRoutingCycleAsync(dryRun: true);
         _routeNowButton.Click += async (_, _) => await ExecuteRoutingCycleAsync();
         _autoRouteCheck.CheckedChanged += async (_, _) => await ToggleAutoRoutingAsync();
         _showCredentialsCheck.CheckedChanged += (_, _) => ToggleCredentialVisibility();
         _advancedAuthenticationCheck.CheckedChanged += (_, _) => ToggleAdvancedAuthentication();
         _verticalSyncCheck.CheckedChanged += (_, _) => ApplySmoothRendering();
-        _emailText.TextChanged += (_, _) => _currentSession = null;
-        _passwordText.TextChanged += (_, _) => _currentSession = null;
-        _baseUrlText.TextChanged += (_, _) => _currentSession = null;
-        _platformCombo.SelectedIndexChanged += (_, _) => RecalculateCandidate();
-        _minimumSuccessInput.ValueChanged += (_, _) => RecalculateCandidate();
+        _emailText.TextChanged += (_, _) => ResetAuthenticationAndRoutingService();
+        _passwordText.TextChanged += (_, _) => ResetAuthenticationAndRoutingService();
+        _baseUrlText.TextChanged += (_, _) => ResetAuthenticationAndRoutingService();
+        _tokenText.TextChanged += (_, _) =>
+        {
+            if (!_applyingSessionCredentials)
+            {
+                _currentSession = null;
+                InvalidateRoutingService();
+            }
+        };
+        _cookieText.TextChanged += (_, _) => InvalidateRoutingService();
+        _userAgentText.TextChanged += (_, _) => InvalidateRoutingService();
+        _platformCombo.SelectedIndexChanged += (_, _) =>
+        {
+            InvalidateRoutingService();
+            RecalculateCandidate();
+        };
+        _minimumSuccessInput.ValueChanged += (_, _) =>
+        {
+            InvalidateRoutingService();
+            RecalculateCandidate();
+        };
         _intervalInput.ValueChanged += (_, _) => UpdateTimerInterval();
+        _routingModeCombo.SelectedIndexChanged += (_, _) =>
+        {
+            InvalidateRoutingService();
+            RecalculateCandidate();
+            SaveCurrentSettings(showStatus: false);
+        };
+        _accountCacheInput.ValueChanged += (_, _) =>
+        {
+            InvalidateRoutingService();
+            SaveCurrentSettings(showStatus: false);
+        };
+        _themeCombo.SelectedIndexChanged += (_, _) =>
+        {
+            ApplySelectedTheme();
+            SaveCurrentSettings(showStatus: false);
+        };
         _keyGrid.CellValueChanged += (_, eventArgs) => HandleKeySelectionChanged(eventArgs);
         _autoTimer.Tick += async (_, _) => await ExecuteRoutingCycleAsync();
         UpdateTimerInterval();
@@ -164,14 +215,14 @@ internal sealed partial class MainForm : Form
         RecalculateCandidate();
     }
 
-    private async Task ExecuteRoutingCycleAsync()
+    private async Task ExecuteRoutingCycleAsync(bool dryRun = false, bool forceAccountRefresh = false)
     {
         if (_busy)
         {
             return;
         }
 
-        SetBusy(true, "正在计算最低价路由...");
+        SetBusy(true, dryRun ? "正在模拟路由决策..." : "正在执行路由...");
         try
         {
             if (!HasCredentials())
@@ -179,7 +230,9 @@ internal sealed partial class MainForm : Form
                 throw new InvalidOperationException("请先输入邮箱和密码，或展开高级认证填写 Token/Cookie。");
             }
 
-            await RunAuthenticatedAsync(ExecuteRoutingCoreAsync);
+            var service = EnsureRoutingService();
+            var result = await service.RunOnceAsync(dryRun, forceAccountRefresh, _shutdown.Token);
+            ApplyRoutingCycleResult(result);
         }
         catch (Exception exception)
         {
@@ -189,6 +242,222 @@ internal sealed partial class MainForm : Form
         {
             SetBusy(false);
         }
+    }
+
+    private RoutingService EnsureRoutingService()
+    {
+        if (_routingService is not null)
+        {
+            return _routingService;
+        }
+
+        var storageDirectory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "AIHubRouter");
+        var settings = BuildPersistentSettings();
+        var credentials = new PersistentCredentials
+        {
+            Email = _emailText.Text.Trim(),
+            Password = _passwordText.Text,
+            BearerToken = _currentSession?.AccessToken ?? _tokenText.Text,
+            RefreshToken = _currentSession?.RefreshToken ?? string.Empty,
+            AccessTokenExpiresAt = _currentSession?.ExpiresAt,
+            Cookie = _cookieText.Text,
+            UserAgent = _userAgentText.Text
+        };
+        _routingService = new RoutingService(
+            settings,
+            credentials,
+            new JsonRouteStateStore(storageDirectory),
+            persistCredentials: PersistRoutingCredentialsAsync);
+        return _routingService;
+    }
+
+    private Task PersistRoutingCredentialsAsync(
+        PersistentCredentials credentials,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        _currentSession = new AuthSession(
+            credentials.BearerToken,
+            credentials.RefreshToken,
+            credentials.AccessTokenExpiresAt ?? DateTimeOffset.MinValue);
+        _applyingSessionCredentials = true;
+        try
+        {
+            _tokenText.Text = credentials.BearerToken;
+        }
+        finally
+        {
+            _applyingSessionCredentials = false;
+        }
+        if (_persistCredentialsCheck.Checked && !SaveCurrentSettings(showStatus: false))
+        {
+            throw new InvalidOperationException("Session refreshed but encrypted persistence failed.");
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private void ApplyRoutingCycleResult(RoutingCycleResult result)
+    {
+        _lastEvaluation = result.Evaluation;
+        _summary = new MonitorSummary { Apis = result.Providers.ToList() };
+        _groups = result.Groups;
+        _userRates = result.UserGroupRates;
+        _bestCandidate = result.Decision.Target;
+        ApplyKeys(result.Keys);
+
+        var groupLookup = _groups.ToDictionary(group => group.Id);
+        var candidateLookup = result.Evaluation.EligibleCandidates.ToDictionary(candidate => candidate.Group.Id);
+        var rows = result.Providers
+            .Where(provider => provider.Platform.Equals(_platformCombo.SelectedItem?.ToString() ?? "openai", StringComparison.OrdinalIgnoreCase))
+            .Select(provider =>
+            {
+                var groupId = provider.GroupId;
+                var score = groupId is { } id && result.Evaluation.CandidateScores.TryGetValue(id, out var value)
+                    ? value.ToString("0.###")
+                    : "-";
+                var decisionState = groupId is { } decisionGroupId && decisionGroupId == result.Decision.Target?.Group.Id ? "推荐"
+                    : groupId is { } currentGroupId && currentGroupId == result.Decision.Current?.Group.Id ? "当前"
+                    : groupId is { } baselineGroupId && baselineGroupId == result.Evaluation.Baseline?.Group.Id ? "最低价"
+                    : string.Empty;
+                var effective = groupId is { } effectiveGroup && candidateLookup.TryGetValue(effectiveGroup, out var candidate)
+                    ? $"{candidate.EffectiveMultiplier:0.####}{(candidate.HasUserRateOverride ? " *" : string.Empty)}"
+                    : $"{provider.PriceMultiplier:0.####}";
+                return new ProviderGridRow
+                {
+                    Source = provider,
+                    IsBest = groupId is { } targetGroupId && targetGroupId == result.Decision.Target?.Group.Id,
+                    EffectiveRate = effective,
+                    WeightedScore = score,
+                    DecisionState = decisionState,
+                    State = groupId is { } authorizedId && groupLookup.ContainsKey(authorizedId) ? "可路由" : "账号不可用"
+                };
+            })
+            .OrderByDescending(row => row.IsBest)
+            .ThenBy(row => row.WeightedScore)
+            .ToList();
+        _providerGrid.DataSource = new BindingList<ProviderGridRow>(rows);
+        _candidateLabel.Text = result.Decision.Target is { } target
+            ? $"{ModeDisplayName()}：{target.Provider.PlanType}  {target.EffectiveMultiplier:0.####}x"
+            : "当前模式：无符合项";
+
+        var reason = DecisionReasonText(result.Decision.Reason);
+        var changeText = result.DryRun
+            ? $"模拟：{result.ChangedKeyCount} 个 Key 将切换"
+            : $"已切换 {result.ChangedKeyCount} 个 Key";
+        var failedNames = result.KeyResults
+            .Where(key => !key.Success)
+            .Select(key => key.KeyName)
+            .ToArray();
+        if (failedNames.Length > 0)
+        {
+            changeText += $"，失败 {failedNames.Length} 个：{string.Join("、", failedNames)}";
+        }
+        SetStatus($"{reason}；{changeText}", result.FailedKeyCount == 0);
+        WriteAudit(result);
+    }
+
+    private void WriteAudit(RoutingCycleResult result)
+    {
+        try
+        {
+            var directory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "AIHubRouter", "logs");
+            var writer = new AuditLogWriter(Path.Combine(directory, "routing.jsonl"));
+            writer.Write(new RouteAuditEntry(
+                result.CompletedAt,
+                CurrentRoutingMode(),
+                result.Decision.Reason,
+                result.Decision.Current?.Group.Id,
+                result.Decision.Target?.Group.Id,
+                result.DryRun,
+                result.Evaluation.EligibleCandidates.Select(candidate => new RouteAuditCandidate(
+                    candidate.Group.Id,
+                    candidate.EffectiveMultiplier,
+                    candidate.Provider.FirstTokenLatencyMs,
+                    result.Evaluation.CandidateScores.TryGetValue(candidate.Group.Id, out var score) ? score : 0,
+                    candidate.Group.Id == result.Decision.Target?.Group.Id)).ToArray(),
+                result.KeyResults.Select(key => new RouteAuditKey(
+                    key.KeyId,
+                    key.Changed,
+                    key.Success,
+                    key.Error is null ? null : "update-failed")).ToArray()));
+        }
+        catch
+        {
+            // Audit failure must not interrupt a successful route cycle.
+        }
+    }
+
+    private PersistentAppSettings BuildPersistentSettings()
+    {
+        return new PersistentAppSettings
+        {
+            PersistCredentials = _persistCredentialsCheck.Checked,
+            BaseUrl = _baseUrlText.Text.Trim(),
+            Platform = _platformCombo.SelectedItem?.ToString() ?? "openai",
+            RoutingMode = CurrentRoutingMode(),
+            MinimumSuccessPercent = (int)_minimumSuccessInput.Value,
+            PollingIntervalSeconds = (int)_intervalInput.Value,
+            AccountCacheSeconds = (int)_accountCacheInput.Value,
+            SmoothRendering = _verticalSyncCheck.Checked,
+            Theme = _themePreference,
+            KeySelectionInitialized = _keySelectionInitialized,
+            SelectedKeyIds = _savedSelectedKeyIds.Order().ToArray()
+        };
+    }
+
+    private RoutingMode CurrentRoutingMode()
+    {
+        return _routingModeCombo.SelectedIndex switch
+        {
+            1 => RoutingMode.Balanced,
+            2 => RoutingMode.Speed,
+            _ => RoutingMode.Economy
+        };
+    }
+
+    private string ModeDisplayName() => _routingModeCombo.SelectedItem?.ToString() ?? "经济";
+
+    private static string DecisionReasonText(RouteDecisionReason reason)
+    {
+        return reason switch
+        {
+            RouteDecisionReason.NoCandidate => "没有符合条件的路由",
+            RouteDecisionReason.InitialRoute => "建立初始路由",
+            RouteDecisionReason.CurrentRouteInvalid => "当前路由已不可用",
+            RouteDecisionReason.AlreadyOptimal => "当前路由已是最优",
+            RouteDecisionReason.BetterPrice => "发现更低价格",
+            RouteDecisionReason.FasterForWeightedTradeoff => "速度收益超过价格增幅",
+            _ => "路由评估完成"
+        };
+    }
+
+    private void ResetAuthenticationAndRoutingService()
+    {
+        _currentSession = null;
+        InvalidateRoutingService();
+    }
+
+    private void InvalidateRoutingService()
+    {
+        _routingService?.Dispose();
+        _routingService = null;
+    }
+
+    private void ApplySelectedTheme()
+    {
+        _themePreference = _themeCombo.SelectedIndex switch
+        {
+            1 => WinFormsTheme.Light,
+            2 => WinFormsTheme.Dark,
+            _ => WinFormsTheme.System
+        };
+        _activePalette = NativeThemeManager.Resolve(_themePreference);
+        NativeThemeManager.Apply(this, _activePalette);
     }
 
     private async Task ExecuteRoutingCoreAsync(AIHubClient client)
@@ -258,17 +527,24 @@ internal sealed partial class MainForm : Form
             (double)_minimumSuccessInput.Value / 100,
             TimeSpan.FromMinutes(15));
 
-        _bestCandidate = RoutingEngine.SelectCheapest(
+        _lastEvaluation = RoutingEngine.Evaluate(
             _summary.Apis,
             _groups,
             _userRates,
-            criteria,
+            new BalancedRoutingPolicy
+            {
+                Platform = platform,
+                Mode = CurrentRoutingMode(),
+                MinimumSuccessRate6h = criteria.MinimumSuccessRate6h,
+                MaximumStatusAge = criteria.MaximumStatusAge
+            },
             DateTimeOffset.UtcNow);
+        _bestCandidate = _lastEvaluation.Recommended;
 
         ApplyProviders(criteria);
         _candidateLabel.Text = _bestCandidate is null
-            ? "最低价：无符合项"
-            : $"最低价：{_bestCandidate.Provider.PlanType}  {_bestCandidate.EffectiveMultiplier:0.####}x";
+            ? $"{ModeDisplayName()}：无符合项"
+            : $"{ModeDisplayName()}：{_bestCandidate.Provider.PlanType}  {_bestCandidate.EffectiveMultiplier:0.####}x";
     }
 
     private void ApplyProviders(RoutingCriteria criteria)
@@ -288,6 +564,12 @@ internal sealed partial class MainForm : Form
                 var overrideRate = 0d;
                 var hasOverride = provider.GroupId is { } id && _userRates.TryGetValue(id, out overrideRate);
                 var effectiveRate = hasOverride ? overrideRate : provider.PriceMultiplier;
+                if (provider.GroupId is { } candidateGroup &&
+                    _lastEvaluation?.EligibleCandidates.FirstOrDefault(candidate => candidate.Group.Id == candidateGroup) is { } evaluatedCandidate)
+                {
+                    effectiveRate = evaluatedCandidate.EffectiveMultiplier;
+                    hasOverride = evaluatedCandidate.HasUserRateOverride;
+                }
                 var isFresh = provider.CheckedAt is { } checkedAt &&
                     now - checkedAt >= TimeSpan.FromMinutes(-1) &&
                     now - checkedAt <= criteria.MaximumStatusAge;
@@ -304,6 +586,15 @@ internal sealed partial class MainForm : Form
                     Source = provider,
                     IsBest = _bestCandidate?.Provider.Id == provider.Id,
                     EffectiveRate = hasOverride ? $"{effectiveRate:0.####} *" : $"{effectiveRate:0.####}",
+                    WeightedScore = provider.GroupId is { } scoreGroupId &&
+                        _lastEvaluation?.CandidateScores.TryGetValue(scoreGroupId, out var score) == true
+                            ? score.ToString("0.###")
+                            : "-",
+                    DecisionState = provider.GroupId is { } recommendedGroupId &&
+                        recommendedGroupId == _lastEvaluation?.Recommended?.Group.Id ? "推荐"
+                        : provider.GroupId is { } baselineGroupId &&
+                            baselineGroupId == _lastEvaluation?.Baseline?.Group.Id ? "最低价"
+                        : string.Empty,
                     State = state
                 };
             })
@@ -376,6 +667,7 @@ internal sealed partial class MainForm : Form
         }
 
         CaptureKeySelection();
+        InvalidateRoutingService();
         if (_persistCredentialsCheck.Checked)
         {
             SaveCurrentSettings(showStatus: false);
@@ -423,6 +715,7 @@ internal sealed partial class MainForm : Form
     private void ShowAuthenticationGuide()
     {
         using var dialog = new AuthGuideDialog(_baseUrlText.Text);
+        NativeThemeManager.Apply(dialog, _activePalette);
         dialog.ShowDialog(this);
     }
 
@@ -495,6 +788,20 @@ internal sealed partial class MainForm : Form
 
             _minimumSuccessInput.Value = Math.Clamp(settings.MinimumSuccessPercent, 0, 100);
             _intervalInput.Value = Math.Clamp(settings.PollingIntervalSeconds, 30, 3600);
+            _accountCacheInput.Value = Math.Clamp(settings.AccountCacheSeconds, 30, 3600);
+            _routingModeCombo.SelectedIndex = settings.RoutingMode switch
+            {
+                RoutingMode.Balanced => 1,
+                RoutingMode.Speed => 2,
+                _ => 0
+            };
+            _themeCombo.SelectedIndex = settings.Theme switch
+            {
+                WinFormsTheme.Light => 1,
+                WinFormsTheme.Dark => 2,
+                _ => 0
+            };
+            _themePreference = settings.Theme;
             _verticalSyncCheck.Checked = settings.SmoothRendering;
             _persistCredentialsCheck.Checked = settings.PersistCredentials;
             _keySelectionInitialized = settings.KeySelectionInitialized;
@@ -542,17 +849,7 @@ internal sealed partial class MainForm : Form
                 CaptureKeySelection();
             }
 
-            var settings = new PersistentAppSettings
-            {
-                PersistCredentials = _persistCredentialsCheck.Checked,
-                BaseUrl = _baseUrlText.Text.Trim(),
-                Platform = _platformCombo.SelectedItem?.ToString() ?? "openai",
-                MinimumSuccessPercent = (int)_minimumSuccessInput.Value,
-                PollingIntervalSeconds = (int)_intervalInput.Value,
-                SmoothRendering = _verticalSyncCheck.Checked,
-                KeySelectionInitialized = _keySelectionInitialized,
-                SelectedKeyIds = _savedSelectedKeyIds.Order().ToArray()
-            };
+            var settings = BuildPersistentSettings();
             var credentials = settings.PersistCredentials
                 ? new PersistentCredentials
                 {
@@ -659,7 +956,15 @@ internal sealed partial class MainForm : Form
     {
         cancellationToken.ThrowIfCancellationRequested();
         _currentSession = session;
-        _tokenText.Text = session.AccessToken;
+        _applyingSessionCredentials = true;
+        try
+        {
+            _tokenText.Text = session.AccessToken;
+        }
+        finally
+        {
+            _applyingSessionCredentials = false;
+        }
         if (_persistCredentialsCheck.Checked && !SaveCurrentSettings(showStatus: false))
         {
             throw new InvalidOperationException("认证 session 已更新，但加密保存失败。");
@@ -706,12 +1011,13 @@ internal sealed partial class MainForm : Form
         _busy = busy;
         _validateButton.Enabled = !busy;
         _refreshButton.Enabled = !busy;
+        _simulateButton.Enabled = !busy;
         _routeNowButton.Enabled = !busy;
         _progressBar.Visible = busy;
         if (message is not null)
         {
             _statusLabel.Text = message;
-            _statusLabel.ForeColor = Color.FromArgb(55, 65, 75);
+            _statusLabel.ForeColor = _activePalette.MutedText;
         }
     }
 
@@ -719,8 +1025,8 @@ internal sealed partial class MainForm : Form
     {
         _statusLabel.Text = message;
         _statusLabel.ForeColor = success
-            ? Color.FromArgb(20, 110, 65)
-            : Color.FromArgb(185, 45, 45);
+            ? _activePalette.Success
+            : _activePalette.Error;
     }
 
     private void HandleError(Exception exception)

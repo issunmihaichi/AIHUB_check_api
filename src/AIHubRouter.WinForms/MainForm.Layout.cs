@@ -24,8 +24,11 @@ internal sealed partial class MainForm
     private readonly CheckBox _persistCredentialsCheck = new() { Text = "常态化保存认证", AutoSize = true };
     private readonly Button _saveSettingsButton = new() { Text = "保存当前配置", AutoSize = true };
     private readonly Button _refreshButton = new() { Text = "刷新数据", AutoSize = true };
+    private readonly Button _simulateButton = new() { Text = "模拟", AutoSize = true };
     private readonly Button _routeNowButton = new() { Text = "立即路由", AutoSize = true };
     private readonly ComboBox _platformCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 110 };
+    private readonly ComboBox _routingModeCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 92 };
+    private readonly ComboBox _themeCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 112 };
     private readonly NumericUpDown _minimumSuccessInput = new()
     {
         Minimum = 0,
@@ -40,6 +43,14 @@ internal sealed partial class MainForm
         Maximum = 3600,
         Increment = 30,
         Value = 60,
+        Width = 80
+    };
+    private readonly NumericUpDown _accountCacheInput = new()
+    {
+        Minimum = 30,
+        Maximum = 3600,
+        Increment = 30,
+        Value = 300,
         Width = 80
     };
     private readonly CheckBox _autoRouteCheck = new() { Text = "自动路由", AutoSize = true };
@@ -57,6 +68,7 @@ internal sealed partial class MainForm
         Visible = false,
         Width = 90
     };
+    private NativeThemePalette _activePalette = NativeThemeManager.LightPalette;
 
     private void InitializeUi()
     {
@@ -72,6 +84,10 @@ internal sealed partial class MainForm
 
         _platformCombo.Items.AddRange(["openai", "anthropic", "gemini", "antigravity", "grok"]);
         _platformCombo.SelectedIndex = 0;
+        _routingModeCombo.Items.AddRange(["经济", "均衡", "速度"]);
+        _routingModeCombo.SelectedIndex = 0;
+        _themeCombo.Items.AddRange(["跟随系统", "浅色", "深色"]);
+        _themeCombo.SelectedIndex = 0;
 
         var root = new TableLayoutPanel
         {
@@ -82,7 +98,7 @@ internal sealed partial class MainForm
             BackColor = BackColor
         };
         root.RowStyles.Add(_credentialPanelRowStyle);
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 94));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         root.Controls.Add(BuildCredentialPanel(), 0, 0);
@@ -228,7 +244,7 @@ internal sealed partial class MainForm
         {
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = false,
+            WrapContents = true,
             Padding = new Padding(4, 12, 4, 8),
             BackColor = BackColor
         };
@@ -241,9 +257,17 @@ internal sealed partial class MainForm
         panel.Controls.Add(CreateToolbarLabel("轮询间隔"));
         panel.Controls.Add(_intervalInput);
         panel.Controls.Add(CreateToolbarLabel("秒"));
+        panel.Controls.Add(CreateToolbarLabel("账户缓存"));
+        panel.Controls.Add(_accountCacheInput);
+        panel.Controls.Add(CreateToolbarLabel("秒"));
         panel.Controls.Add(_autoRouteCheck);
         panel.Controls.Add(_verticalSyncCheck);
+        panel.Controls.Add(CreateToolbarLabel("模式"));
+        panel.Controls.Add(_routingModeCombo);
+        panel.Controls.Add(CreateToolbarLabel("主题"));
+        panel.Controls.Add(_themeCombo);
         panel.Controls.Add(_refreshButton);
+        panel.Controls.Add(_simulateButton);
         panel.Controls.Add(_routeNowButton);
         return panel;
     }
@@ -309,6 +333,8 @@ internal sealed partial class MainForm
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "平台", DataPropertyName = "Platform", Width = 85 });
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "公开倍率", DataPropertyName = "PublicRate", Width = 82 });
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "实际倍率", DataPropertyName = "EffectiveRate", Width = 82 });
+        _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "权重分", DataPropertyName = "WeightedScore", Width = 82 });
+        _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "决策", DataPropertyName = "DecisionState", Width = 96 });
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "状态", DataPropertyName = "State", Width = 105 });
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "6h 可用率", DataPropertyName = "Success6h", Width = 92 });
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "首 Token", DataPropertyName = "FirstToken", Width = 88 });
@@ -317,8 +343,8 @@ internal sealed partial class MainForm
         {
             if (_providerGrid.Rows[eventArgs.RowIndex].DataBoundItem is ProviderGridRow { IsBest: true })
             {
-                _providerGrid.Rows[eventArgs.RowIndex].DefaultCellStyle.BackColor = Color.FromArgb(226, 244, 234);
-                _providerGrid.Rows[eventArgs.RowIndex].DefaultCellStyle.ForeColor = Color.FromArgb(20, 83, 45);
+                _providerGrid.Rows[eventArgs.RowIndex].DefaultCellStyle.BackColor = _activePalette.Selection;
+                _providerGrid.Rows[eventArgs.RowIndex].DefaultCellStyle.ForeColor = _activePalette.SelectionText;
             }
         };
     }
@@ -410,6 +436,10 @@ internal sealed partial class MainForm
         _toolTip.SetToolTip(_saveSettingsButton, "立即保存连接、认证、Key 勾选和路由界面配置。");
         _toolTip.SetToolTip(_providerGrid, "拖动列分隔线时调整右侧列：向左扩宽右侧列，向右缩窄右侧列。");
         _toolTip.SetToolTip(_keyGrid, "拖动列分隔线时调整右侧列：向左扩宽右侧列，向右缩窄右侧列。");
+        _toolTip.SetToolTip(_routingModeCombo, "经济优先价格；均衡权衡价格和首 token 延迟；速度优先低延迟。");
+        _toolTip.SetToolTip(_simulateButton, "只计算并展示决策，不会修改任何 API Key。");
+        _toolTip.SetToolTip(_themeCombo, "跟随 Windows 个性化设置，或固定浅色/深色 WinForms 调色板。");
+        _toolTip.SetToolTip(_accountCacheInput, "账户分组、倍率和 Key 列表在此时间内复用；监控数据每次刷新。");
     }
 
     private static Label CreateToolbarLabel(string text)
