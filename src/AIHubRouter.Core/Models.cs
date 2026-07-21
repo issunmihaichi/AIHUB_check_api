@@ -52,7 +52,24 @@ public sealed class ProviderStatus
     [JsonPropertyName("errorMessage")]
     public string? ErrorMessage { get; init; }
 
+    [JsonPropertyName("warningReasons")]
+    public List<ProviderWarningReason> WarningReasons { get; init; } = [];
+
     public double? SuccessRate6h => SuccessRates.TryGetValue("6h", out var value) ? value : null;
+
+    public bool HasWarnings => WarningReasons.Count > 0;
+}
+
+public sealed class ProviderWarningReason
+{
+    [JsonPropertyName("type")]
+    public string Type { get; init; } = string.Empty;
+
+    [JsonPropertyName("message")]
+    public string Message { get; init; } = string.Empty;
+
+    [JsonPropertyName("count")]
+    public int? Count { get; init; }
 }
 
 public sealed class GroupInfo

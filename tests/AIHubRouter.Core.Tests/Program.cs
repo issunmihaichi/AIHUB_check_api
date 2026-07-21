@@ -10,6 +10,9 @@ var tests = new (string Name, Action Body)[]
     ("Lowest available authorized group", TestLowestAvailableGroup),
     ("User rate override", TestUserRateOverride),
     ("Availability threshold", TestAvailabilityThreshold),
+    ("Provider warnings deserialize", TestProviderWarningsDeserialize),
+    ("Warning provider remains eligible", TestWarningProviderRemainsEligible),
+    ("Latest unavailable state remains ineligible", TestLatestUnavailableStateRemainsIneligible),
     ("Stale status rejection", TestStaleStatusRejection),
     ("Routing preferences default to Win32-compatible values", TestRoutingPreferenceDefaults),
     ("Routing preferences roundtrip", TestRoutingPreferenceRoundtrip),
@@ -145,6 +148,51 @@ static void TestAvailabilityThreshold()
 
     var result = RoutingEngine.SelectCheapest(providers, new[] { Group(1), Group(2) }, new Dictionary<long, double>(), criteria, now);
     Assert(result?.Group.Id == 2, "Low-availability group was not rejected.");
+}
+
+static void TestProviderWarningsDeserialize()
+{
+    var provider = JsonSerializer.Deserialize<ProviderStatus>("""
+        {
+          "id":"provider-1",
+          "warningReasons":[{"type":"latency_spike","message":"synthetic warning","count":3}]
+        }
+        """)!;
+
+    Assert(provider.HasWarnings, "Warning metadata was not recognized.");
+    Assert(provider.WarningReasons.Single().Type == "latency_spike", "Warning type was not mapped.");
+    Assert(provider.WarningReasons.Single().Count == 3, "Warning count was not mapped.");
+}
+
+static void TestWarningProviderRemainsEligible()
+{
+    var now = DateTimeOffset.UtcNow;
+    var provider = Provider(1, 0.01, available: true, success: 0.95, now, warning: true);
+    var result = RoutingEngine.SelectCheapest(
+        [provider],
+        [Group(1)],
+        new Dictionary<long, double>(),
+        new RoutingCriteria("openai", 0.9, TimeSpan.FromMinutes(15)),
+        now);
+
+    Assert(result?.Group.Id == 1 && result.Provider.HasWarnings,
+        "Warning metadata incorrectly made an available provider ineligible.");
+}
+
+static void TestLatestUnavailableStateRemainsIneligible()
+{
+    var now = DateTimeOffset.UtcNow;
+    var result = RoutingEngine.SelectCheapest(
+        [
+            Provider(1, 0.01, available: false, success: 1, now),
+            Provider(2, 0.02, available: true, success: 0.95, now)
+        ],
+        [Group(1), Group(2)],
+        new Dictionary<long, double>(),
+        new RoutingCriteria("openai", 0.9, TimeSpan.FromMinutes(15)),
+        now);
+
+    Assert(result?.Group.Id == 2, "Latest unavailable state did not control eligibility.");
 }
 
 static void TestStaleStatusRejection()
@@ -1071,7 +1119,14 @@ static HttpResponseMessage JsonResponse(string json)
     };
 }
 
-static ProviderStatus Provider(long groupId, double rate, bool available, double success, DateTimeOffset checkedAt, double? latency = 1000)
+static ProviderStatus Provider(
+    long groupId,
+    double rate,
+    bool available,
+    double success,
+    DateTimeOffset checkedAt,
+    double? latency = 1000,
+    bool warning = false)
 {
     return new ProviderStatus
     {
@@ -1084,7 +1139,10 @@ static ProviderStatus Provider(long groupId, double rate, bool available, double
         Enabled = true,
         CheckedAt = checkedAt,
         FirstTokenLatencyMs = latency,
-        SuccessRates = new Dictionary<string, double> { ["6h"] = success }
+        SuccessRates = new Dictionary<string, double> { ["6h"] = success },
+        WarningReasons = warning
+            ? [new ProviderWarningReason { Type = "synthetic_warning", Message = "synthetic warning" }]
+            : []
     };
 }
 
