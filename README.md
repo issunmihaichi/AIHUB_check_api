@@ -84,3 +84,5 @@ WinForms 不支持安全的程序集裁剪，因此不启用 `PublishTrimmed`。
 ## 下游贡献与支持范围
 
 本项目仍然只维护 Windows 原生 WinForms。加权路由模式（经济/均衡/速度）、可解释决策、账户缓存、路由状态、模拟运行、无凭据审计日志和原生主题行为参考并适配自 [OnRightPath/AIHubRouter](https://github.com/OnRightPath/AIHubRouter)。下游项目的 Linux、Avalonia、CLI、systemd 和跨平台发布内容不属于本仓库的支持范围。
+
+供应商警告字段和路由分数防抖选择性兼容下游 v1.0.2/v1.0.3；本项目仍以 Economy 为默认模式，保留 95/5、80/20、35/65 三档本地权重和可调的 6 小时可用率阈值。
