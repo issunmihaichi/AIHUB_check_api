@@ -73,11 +73,13 @@ public static class RouteDecisionEngine
                 "当前路由已不可用");
         }
 
-        var selected = SelectAdaptiveTarget(
+        var search = SelectAdaptiveTarget(
             current,
             evaluation.EligibleCandidates,
             context,
             effectivePreference);
+        var rankings = BuildAdaptiveRankings(search);
+        var selected = search.Selected;
         if (selected is null)
         {
             if (current.Group.Id == target.Group.Id)
@@ -88,7 +90,8 @@ public static class RouteDecisionEngine
                     context,
                     effectivePreference,
                     adaptiveDecision: null,
-                    "当前路由已是最优");
+                    "当前路由已是最优",
+                    rankings);
             }
 
             selected = new AdaptiveCandidateSelection(
@@ -117,7 +120,8 @@ public static class RouteDecisionEngine
                 context,
                 effectivePreference,
                 adaptiveDecision,
-                adaptiveDecision.Detail);
+                adaptiveDecision.Detail,
+                rankings);
         }
 
         return Enrich(
@@ -133,7 +137,8 @@ public static class RouteDecisionEngine
             context,
             effectivePreference,
             adaptiveDecision,
-            adaptiveDecision.Detail);
+            adaptiveDecision.Detail,
+            rankings);
     }
 
     private static RouteDecisionResult Enrich(
@@ -141,7 +146,8 @@ public static class RouteDecisionEngine
         AdaptiveRoutingContext context,
         AdaptivePreference effectivePreference,
         AdaptiveSwitchDecision? adaptiveDecision,
-        string detail) =>
+        string detail,
+        IReadOnlyList<AdaptiveCandidateRanking>? adaptiveRankings = null) =>
         result with
         {
             Decision = result.Decision with
@@ -150,6 +156,7 @@ public static class RouteDecisionEngine
                 DurationCategory = context.DurationCategory,
                 CurrentIntervalSeconds = context.CurrentIntervalSeconds,
                 AdaptiveDecision = adaptiveDecision,
+                AdaptiveRankings = adaptiveRankings ?? result.Decision.AdaptiveRankings,
                 Detail = detail
             }
         };
@@ -176,43 +183,68 @@ public static class RouteDecisionEngine
             .ThenBy(candidate => candidate.Group.Id)
             .FirstOrDefault();
 
-    private static AdaptiveCandidateSelection? SelectAdaptiveTarget(
+    private static AdaptiveCandidateSearch SelectAdaptiveTarget(
         RouteCandidate current,
         IEnumerable<RouteCandidate> candidates,
         AdaptiveRoutingContext context,
         AdaptivePreference effectivePreference)
     {
-        var accepted = candidates
+        var evaluated = candidates
             .Where(candidate => candidate.Group.Id != current.Group.Id)
             .Select(candidate => new AdaptiveCandidateSelection(
                 candidate,
                 EvaluateAdaptiveDecision(current, candidate, context)))
-            .Where(selection => selection.Decision.ShouldSwitch)
             .ToArray();
+        var accepted = OrderAccepted(evaluated, effectivePreference).ToArray();
 
+        return new AdaptiveCandidateSearch(evaluated, accepted, accepted.FirstOrDefault());
+    }
+
+    private static IEnumerable<AdaptiveCandidateSelection> OrderAccepted(
+        IEnumerable<AdaptiveCandidateSelection> evaluated,
+        AdaptivePreference effectivePreference)
+    {
+        var accepted = evaluated.Where(selection => selection.Decision.ShouldSwitch);
         return effectivePreference switch
         {
             AdaptivePreference.Cost => accepted
                 .OrderByDescending(selection => selection.Decision.NetSavingUsd)
                 .ThenBy(selection => selection.Decision.NewCompletionSeconds)
                 .ThenBy(selection => selection.Candidate.EffectiveMultiplier)
-                .ThenBy(selection => selection.Candidate.Group.Id)
-                .FirstOrDefault(),
+                .ThenBy(selection => selection.Candidate.Group.Id),
             AdaptivePreference.Balanced => accepted
                 .OrderByDescending(selection => selection.Decision.NetSavingUsd)
                 .ThenBy(selection => selection.Decision.NewCompletionSeconds)
                 .ThenBy(selection => selection.Candidate.EffectiveMultiplier)
-                .ThenBy(selection => selection.Candidate.Group.Id)
-                .FirstOrDefault(),
+                .ThenBy(selection => selection.Candidate.Group.Id),
             AdaptivePreference.Speed => accepted
                 .OrderBy(selection => selection.Decision.NewCompletionSeconds)
                 .ThenByDescending(selection => selection.Candidate.Provider.OutputTokensPerSecond ?? 0)
                 .ThenByDescending(selection => selection.Decision.NetSavingUsd)
                 .ThenBy(selection => selection.Candidate.EffectiveMultiplier)
-                .ThenBy(selection => selection.Candidate.Group.Id)
-                .FirstOrDefault(),
-            _ => null
+                .ThenBy(selection => selection.Candidate.Group.Id),
+            _ => []
         };
+    }
+
+    private static IReadOnlyList<AdaptiveCandidateRanking> BuildAdaptiveRankings(
+        AdaptiveCandidateSearch search)
+    {
+        var rankByGroup = search.Accepted
+            .Select((selection, index) => (selection.Candidate.Group.Id, Rank: index + 1))
+            .ToDictionary(entry => entry.Id, entry => entry.Rank);
+
+        return search.Evaluated
+            .Select(selection => new AdaptiveCandidateRanking(
+                selection.Candidate.Group.Id,
+                rankByGroup.TryGetValue(selection.Candidate.Group.Id, out var rank) ? rank : null,
+                selection.Decision.ShouldSwitch,
+                selection.Decision.Reason,
+                selection.Decision.NetSavingUsd,
+                selection.Decision.NewCompletionSeconds))
+            .OrderBy(ranking => ranking.Rank ?? int.MaxValue)
+            .ThenBy(ranking => ranking.GroupId)
+            .ToArray();
     }
 
     private static AdaptiveSwitchDecision EvaluateAdaptiveDecision(
@@ -233,6 +265,11 @@ public static class RouteDecisionEngine
     private sealed record AdaptiveCandidateSelection(
         RouteCandidate Candidate,
         AdaptiveSwitchDecision Decision);
+
+    private sealed record AdaptiveCandidateSearch(
+        IReadOnlyList<AdaptiveCandidateSelection> Evaluated,
+        IReadOnlyList<AdaptiveCandidateSelection> Accepted,
+        AdaptiveCandidateSelection? Selected);
 
     private static RouteDecisionResult Switched(
         RouteCandidate? current,

@@ -266,8 +266,17 @@ public sealed record RouteDecision(
     public TaskDurationCategory? DurationCategory { get; init; }
     public double? CurrentIntervalSeconds { get; init; }
     public AdaptiveSwitchDecision? AdaptiveDecision { get; init; }
+    public IReadOnlyList<AdaptiveCandidateRanking> AdaptiveRankings { get; init; } = [];
     public string Detail { get; init; } = string.Empty;
 }
+
+public sealed record AdaptiveCandidateRanking(
+    long GroupId,
+    int? Rank,
+    bool Accepted,
+    AdaptiveDecisionReason Reason,
+    double NetSavingUsd,
+    double NewCompletionSeconds);
 
 public sealed record AdaptiveRoutingContext(
     RoutingMode BaseMode,

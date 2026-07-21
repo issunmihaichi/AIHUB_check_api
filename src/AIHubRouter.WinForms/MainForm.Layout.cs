@@ -339,6 +339,7 @@ internal sealed partial class MainForm
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "公开倍率", DataPropertyName = "PublicRate", Width = 82 });
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "实际倍率", DataPropertyName = "EffectiveRate", Width = 82 });
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "参考分", DataPropertyName = "WeightedScore", Width = 82 });
+        _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "算法排行", DataPropertyName = "AdaptiveRank", Width = 82 });
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "决策", DataPropertyName = "DecisionState", Width = 96 });
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "状态", DataPropertyName = "State", Width = 105 });
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "6h 可用率", DataPropertyName = "Success6h", Width = 92 });
