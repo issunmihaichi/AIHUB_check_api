@@ -295,8 +295,13 @@ public static class AdaptiveSwitchDecisionEngine
         double delta)
     {
         var savingIsEnough = netSaving > 0.5 * penalty;
-        var timeIsAcceptable = newCompletion < config.ExpectedCompletionSeconds ||
+        var relativeTimeIsAcceptable = HasFiniteCompletionTimes(
+                oldCompletion,
+                newCompletion,
+                delta) &&
             delta < 0.1 * oldCompletion;
+        var timeIsAcceptable = newCompletion < config.ExpectedCompletionSeconds ||
+            relativeTimeIsAcceptable;
         var priceReductionIsEnough = request.OldMultiplier > 0 &&
             (request.OldMultiplier - request.NewMultiplier) / request.OldMultiplier > 0.05;
         var accepted = savingIsEnough && timeIsAcceptable && priceReductionIsEnough;
@@ -327,7 +332,8 @@ public static class AdaptiveSwitchDecisionEngine
             request.OldGenerationSpeed > 0 &&
             request.NewGenerationSpeed > request.OldGenerationSpeed * 1.2;
         var priceOkForSpeed = request.NewMultiplier <= request.OldMultiplier * 1.1;
-        var endToEndFaster = delta < -30;
+        var endToEndFaster = HasFiniteCompletionTimes(oldCompletion, newCompletion, delta) &&
+            delta < -30;
         var priceNotHigher = request.NewMultiplier <= request.OldMultiplier;
         var accepted = speedBoost && priceOkForSpeed || endToEndFaster && priceNotHigher;
         return Decision(
@@ -386,6 +392,11 @@ public static class AdaptiveSwitchDecisionEngine
 
     private static string FormatSeconds(double seconds) =>
         double.IsFinite(seconds) ? $"{Format(seconds, "0.0")} 秒" : "不可估算";
+
+    private static bool HasFiniteCompletionTimes(double oldCompletion, double newCompletion, double delta) =>
+        double.IsFinite(oldCompletion) &&
+        double.IsFinite(newCompletion) &&
+        double.IsFinite(delta);
 
     private static string Format(double value, string format) =>
         value.ToString(format, CultureInfo.InvariantCulture);

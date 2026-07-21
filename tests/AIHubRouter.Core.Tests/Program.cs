@@ -27,6 +27,7 @@ var tests = new (string Name, Action Body)[]
     ("Adaptive speed accepts end-to-end gain", TestAdaptiveSpeedAcceptsEndToEndGain),
     ("Adaptive short task is protected outside cost", TestAdaptiveShortTaskProtection),
     ("Adaptive invalid performance cannot switch", TestAdaptiveInvalidPerformance),
+    ("Adaptive invalid old performance cannot satisfy relative time", TestAdaptiveInvalidOldPerformance),
     ("Warning provider remains eligible", TestWarningProviderRemainsEligible),
     ("Latest unavailable state remains ineligible", TestLatestUnavailableStateRemainsIneligible),
     ("Warning presentation excludes server message", TestWarningPresentationExcludesServerMessage),
@@ -42,6 +43,7 @@ var tests = new (string Name, Action Body)[]
     ("Speed mode accepts larger price premium", TestSpeedModeAcceptsLargerPremium),
     ("Selective policy preserves local routing weights", TestSelectivePolicyPreservesLocalWeights),
     ("Cost mode proposes strict cheapest candidate", TestCostModeProposesCheapest),
+    ("Cost mode does not skip cheapest unknown TTFT", TestCostModeKeepsStrictPriceOrderWithUnknownTtft),
     ("Frequent calls override economy with speed", TestFrequentCallsOverrideEconomy),
     ("Idle calls override speed with cost", TestIdleCallsOverrideSpeed),
     ("Adaptive rejection keeps current group", TestAdaptiveRejectionKeepsCurrentGroup),
@@ -393,6 +395,21 @@ static void TestAdaptiveInvalidPerformance()
         "Invalid performance data accidentally satisfied the Balanced safeguards.");
 }
 
+static void TestAdaptiveInvalidOldPerformance()
+{
+    var balanced = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        0.05, 0.02, double.NaN, 1, 20, 5,
+        TaskDurationCategory.Medium, AdaptivePreference.Balanced, 10));
+    var speed = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        0.02, 0.02, 1, 1, 0, 20,
+        TaskDurationCategory.Medium, AdaptivePreference.Speed, 2));
+
+    Assert(!balanced.ShouldSwitch && balanced.Reason == AdaptiveDecisionReason.BalancedGuardRejected,
+        "Invalid old performance satisfied the Balanced relative-time guard.");
+    Assert(!speed.ShouldSwitch && speed.Reason == AdaptiveDecisionReason.SpeedGuardRejected,
+        "Invalid old performance satisfied the Speed end-to-end guard.");
+}
+
 static void TestWarningProviderRemainsEligible()
 {
     var now = DateTimeOffset.UtcNow;
@@ -621,6 +638,36 @@ static void TestCostModeProposesCheapest()
         observedCurrentGroupId: 3);
     Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 1,
         "Cost mode did not select the strict lowest-price baseline.");
+}
+
+static void TestCostModeKeepsStrictPriceOrderWithUnknownTtft()
+{
+    var now = DateTimeOffset.UtcNow;
+    var evaluation = RoutingEngine.Evaluate(
+        [
+            Provider(1, 0.01, true, 0.99, now, null, outputTps: 20),
+            Provider(2, 0.02, true, 0.99, now, 1_000, outputTps: 20),
+            Provider(3, 0.05, true, 0.99, now, 500, outputTps: 20)
+        ],
+        [Group(1), Group(2), Group(3)],
+        new Dictionary<long, double>(),
+        Policy(RoutingMode.Economy),
+        now);
+    Assert(evaluation.Baseline?.Group.Id == 2,
+        "Test setup did not reproduce the measured-only baseline behavior.");
+
+    var result = RouteDecisionEngine.Decide(
+        evaluation,
+        new RouteState { CurrentGroupId = 3 },
+        Policy(RoutingMode.Economy),
+        new AdaptiveRoutingContext(RoutingMode.Economy, TaskDurationCategory.Short, 31),
+        now,
+        observedCurrentGroupId: 3);
+
+    Assert(!result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 3,
+        "Cost mode skipped the strict cheapest candidate and switched to a pricier measured group.");
+    Assert(result.Decision.Reason == RouteDecisionReason.AdaptiveCostRejected,
+        "Unknown cheapest TTFT did not fail the Cost completion guard.");
 }
 
 static void TestFrequentCallsOverrideEconomy()

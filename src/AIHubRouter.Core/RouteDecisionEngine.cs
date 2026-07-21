@@ -39,7 +39,7 @@ public static class RouteDecisionEngine
         var current = evaluation.EligibleCandidates.FirstOrDefault(
             candidate => candidate.Group.Id == currentGroupId);
         var target = effectivePreference == AdaptivePreference.Cost
-            ? evaluation.Baseline
+            ? SelectStrictCheapest(evaluation.EligibleCandidates)
             : evaluation.Recommended;
         if (target is null)
         {
@@ -162,6 +162,14 @@ public static class RouteDecisionEngine
         AdaptiveDecisionReason.SpeedGuardRejected => RouteDecisionReason.AdaptiveSpeedRejected,
         _ => RouteDecisionReason.AdaptiveUnknownPreference
     };
+
+    private static RouteCandidate? SelectStrictCheapest(IEnumerable<RouteCandidate> candidates) =>
+        candidates
+            .OrderBy(candidate => candidate.EffectiveMultiplier)
+            .ThenByDescending(candidate => candidate.Provider.SuccessRate6h ?? 0)
+            .ThenBy(candidate => RoutingEngine.NormalizeLatency(candidate.Provider.FirstTokenLatencyMs))
+            .ThenBy(candidate => candidate.Group.Id)
+            .FirstOrDefault();
 
     private static RouteDecisionResult Switched(
         RouteCandidate? current,
