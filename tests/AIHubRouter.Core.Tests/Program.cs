@@ -86,6 +86,8 @@ var tests = new (string Name, Action Body)[]
     ("Authentication error hides server message", TestAuthenticationErrorHidesServerMessage),
     ("Business error hides server message", TestBusinessErrorHidesServerMessage),
     ("Authentication statuses have safe diagnostics", TestAuthenticationStatusesHaveSafeDiagnostics),
+    ("Business authentication statuses keep business diagnostics", TestBusinessAuthenticationStatusesKeepBusinessDiagnostics),
+    ("Malformed authentication responses retain endpoint context", TestMalformedAuthenticationResponsesRetainEndpointContext),
     ("Unknown errors do not expose credential text", TestUnknownErrorsDoNotExposeCredentialText),
     ("Interactive login requirement is rejected", TestInteractiveLoginRequirementIsRejected),
     ("Empty key selection roundtrips", TestEmptyKeySelectionRoundtrips),
@@ -1624,6 +1626,60 @@ static void TestAuthenticationStatusesHaveSafeDiagnostics()
 
     Assert(messages.Distinct(StringComparer.Ordinal).Count() == cases.Length,
         "Authentication status diagnostics were collapsed into the same message.");
+}
+
+static void TestBusinessAuthenticationStatusesKeepBusinessDiagnostics()
+{
+    const string sensitiveText = "email=private@example.test password=secret token-value";
+
+    var unauthorized = SafeErrorPresentation.GetMessage(new AIHubApiException(
+        sensitiveText,
+        HttpStatusCode.Unauthorized,
+        "401"));
+    Assert(unauthorized.Contains("Token/session 已失效", StringComparison.Ordinal),
+        "Business 401 did not explain that the saved session is invalid.");
+    Assert(!unauthorized.Contains("邮箱或密码不正确", StringComparison.Ordinal),
+        "Business 401 was incorrectly presented as a password failure.");
+
+    var forbidden = SafeErrorPresentation.GetMessage(new AIHubApiException(
+        sensitiveText,
+        HttpStatusCode.Forbidden,
+        "403"));
+    Assert(forbidden == "当前账号没有执行该操作的权限。",
+        "Business 403 did not preserve the permission diagnostic.");
+}
+
+static void TestMalformedAuthenticationResponsesRetainEndpointContext()
+{
+    var responseBodies = new[]
+    {
+        string.Empty,
+        "{",
+        "{\"code\":0,\"message\":\"ok\"}",
+        "{\"code\":0,\"message\":\"ok\",\"data\":null}",
+        "{\"code\":0,\"message\":\"ok\",\"data\":[]}"
+    };
+
+    foreach (var responseBody in responseBodies)
+    {
+        var handler = new StubHttpMessageHandler(_ => JsonResponse(responseBody));
+        using var client = new AIHubClient("https://example.test", messageHandler: handler);
+
+        try
+        {
+            client.LoginAsync(
+                new LoginCredentials("user@example.test", "synthetic-password"),
+                CancellationToken.None).GetAwaiter().GetResult();
+            throw new InvalidOperationException("Malformed authentication response was accepted.");
+        }
+        catch (AIHubApiException exception)
+        {
+            Assert(exception.IsAuthenticationRequest,
+                "Malformed authentication response lost the endpoint context.");
+            Assert(SafeErrorPresentation.GetMessage(exception).StartsWith("认证", StringComparison.Ordinal),
+                "Malformed authentication response did not use authentication guidance.");
+        }
+    }
 }
 
 static void TestUnknownErrorsDoNotExposeCredentialText()

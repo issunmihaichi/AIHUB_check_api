@@ -219,6 +219,13 @@ public sealed class AIHubClient : IAIHubApiClient
         {
             // Non-JSON gateway errors are handled below without reflecting response HTML.
         }
+        catch (JsonException)
+        {
+            throw new AIHubApiException(
+                "服务器响应格式不兼容。",
+                response.StatusCode,
+                isAuthenticationRequest: isAuthenticationEndpoint);
+        }
 
         using (document)
         {
@@ -229,7 +236,10 @@ public sealed class AIHubClient : IAIHubApiClient
 
             if (document is null)
             {
-                throw new AIHubApiException("服务器返回了空响应。", response.StatusCode);
+                throw new AIHubApiException(
+                    "服务器返回了空响应。",
+                    response.StatusCode,
+                    isAuthenticationRequest: isAuthenticationEndpoint);
             }
 
             var root = document.RootElement;
@@ -243,23 +253,41 @@ public sealed class AIHubClient : IAIHubApiClient
 
                 if (!root.TryGetProperty("data", out root))
                 {
-                    throw new AIHubApiException("服务器响应缺少 data 字段。", response.StatusCode, code);
+                    throw new AIHubApiException(
+                        "服务器响应缺少 data 字段。",
+                        response.StatusCode,
+                        code,
+                        isAuthenticationEndpoint);
                 }
             }
 
             if (root.ValueKind == JsonValueKind.Null)
             {
+                if (isAuthenticationEndpoint)
+                {
+                    throw new AIHubApiException(
+                        "认证响应为空。",
+                        response.StatusCode,
+                        isAuthenticationRequest: true);
+                }
+
                 return default!;
             }
 
             try
             {
                 return root.Deserialize<T>(JsonOptions)
-                    ?? throw new AIHubApiException("无法读取服务器响应。", response.StatusCode);
+                    ?? throw new AIHubApiException(
+                        "无法读取服务器响应。",
+                        response.StatusCode,
+                        isAuthenticationRequest: isAuthenticationEndpoint);
             }
             catch (JsonException exception)
             {
-                throw new AIHubApiException($"服务器响应格式不兼容：{exception.Message}", response.StatusCode);
+                throw new AIHubApiException(
+                    $"服务器响应格式不兼容：{exception.Message}",
+                    response.StatusCode,
+                    isAuthenticationRequest: isAuthenticationEndpoint);
             }
         }
     }

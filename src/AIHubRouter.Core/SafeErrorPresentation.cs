@@ -23,7 +23,7 @@ public static class SafeErrorPresentation
 
     private static string GetApiMessage(AIHubApiException exception)
     {
-        if (exception.IsAuthenticationRequest || exception.IsAuthenticationFailure)
+        if (exception.IsAuthenticationRequest)
         {
             return exception.StatusCode switch
             {
@@ -36,6 +36,11 @@ public static class SafeErrorPresentation
                 _ =>
                     "认证失败：邮箱或密码不正确，或保存的 Token/session 已失效。"
             };
+        }
+
+        if (exception.IsAuthenticationFailure)
+        {
+            return "认证失败：保存的 Token/session 已失效，请重新验证。";
         }
 
         return exception.StatusCode switch
