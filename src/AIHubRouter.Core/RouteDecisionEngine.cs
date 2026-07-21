@@ -45,7 +45,10 @@ public static class RouteDecisionEngine
         var latencyImprovement = CalculateLatencyImprovement(
             current.Provider.FirstTokenLatencyMs,
             target.Provider.FirstTokenLatencyMs);
-        if (evaluation.CandidateScores.TryGetValue(current.Group.Id, out var currentScore) &&
+        if (evaluation.MinimumMultiplier is > 0 &&
+            HasFinitePositiveLatency(current.Provider.FirstTokenLatencyMs) &&
+            HasFinitePositiveLatency(target.Provider.FirstTokenLatencyMs) &&
+            evaluation.CandidateScores.TryGetValue(current.Group.Id, out var currentScore) &&
             evaluation.CandidateScores.TryGetValue(target.Group.Id, out var targetScore) &&
             targetScore - currentScore <= policy.MinimumScoreAdvantageToSwitch)
         {
@@ -115,4 +118,7 @@ public static class RouteDecisionEngine
 
         return (currentValue - targetValue) / currentValue * 100;
     }
+
+    private static bool HasFinitePositiveLatency(double? latency) =>
+        latency is > 0 && double.IsFinite(latency.Value);
 }

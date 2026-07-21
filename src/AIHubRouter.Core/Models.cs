@@ -57,7 +57,7 @@ public sealed class ProviderStatus
 
     public double? SuccessRate6h => SuccessRates.TryGetValue("6h", out var value) ? value : null;
 
-    public bool HasWarnings => WarningReasons.Count > 0;
+    public bool HasWarnings => WarningReasons is { Count: > 0 };
 }
 
 public sealed class ProviderWarningReason

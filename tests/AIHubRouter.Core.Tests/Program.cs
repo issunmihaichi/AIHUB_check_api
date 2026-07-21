@@ -11,9 +11,12 @@ var tests = new (string Name, Action Body)[]
     ("User rate override", TestUserRateOverride),
     ("Availability threshold", TestAvailabilityThreshold),
     ("Provider warnings deserialize", TestProviderWarningsDeserialize),
+    ("Null provider warnings are tolerated", TestNullProviderWarningsAreTolerated),
     ("Warning provider remains eligible", TestWarningProviderRemainsEligible),
     ("Latest unavailable state remains ineligible", TestLatestUnavailableStateRemainsIneligible),
     ("Warning presentation excludes server message", TestWarningPresentationExcludesServerMessage),
+    ("Warning decoration requires routable latest state", TestWarningDecorationRequiresRoutableLatestState),
+    ("Routing presentation preserves availability threshold", TestRoutingPresentationPreservesAvailabilityThreshold),
     ("Stale status rejection", TestStaleStatusRejection),
     ("Routing preferences default to Win32-compatible values", TestRoutingPreferenceDefaults),
     ("Routing preferences roundtrip", TestRoutingPreferenceRoundtrip),
@@ -26,6 +29,8 @@ var tests = new (string Name, Action Body)[]
     ("Close cheaper score keeps current group", TestCloseCheaperScoreKeepsCurrentGroup),
     ("Meaningful score advantage still switches", TestMeaningfulScoreAdvantageStillSwitches),
     ("Undefined score does not block a switch", TestUndefinedScoreDoesNotBlockSwitch),
+    ("Zero-price tie does not invoke stability hold", TestZeroPriceTieDoesNotInvokeStabilityHold),
+    ("Unknown-latency tie does not invoke stability hold", TestUnknownLatencyTieDoesNotInvokeStabilityHold),
     ("Missing latency ranks last", TestMissingLatencyRanksLast),
     ("Invalid measurements are excluded", TestInvalidMeasurementsAreExcluded),
     ("Extreme latency scores stay finite", TestExtremeLatencyScoresStayFinite),
@@ -170,6 +175,14 @@ static void TestProviderWarningsDeserialize()
     Assert(provider.WarningReasons.Single().Count == 3, "Warning count was not mapped.");
 }
 
+static void TestNullProviderWarningsAreTolerated()
+{
+    var provider = JsonSerializer.Deserialize<ProviderStatus>("""
+        {"id":"provider-1","warningReasons":null}
+        """)!;
+    Assert(!provider.HasWarnings, "A null warning list was not treated as empty.");
+}
+
 static void TestWarningProviderRemainsEligible()
 {
     var now = DateTimeOffset.UtcNow;
@@ -215,6 +228,34 @@ static void TestWarningPresentationExcludesServerMessage()
     var state = ProviderStatusPresentation.DecorateRoutableState("可路由", provider);
     Assert(state == "可路由（警告）", "Warning state was not decorated safely.");
     Assert(!state.Contains(sensitiveWarning, StringComparison.Ordinal), "Warning message leaked into presentation state.");
+}
+
+static void TestWarningDecorationRequiresRoutableLatestState()
+{
+    var now = DateTimeOffset.UtcNow;
+    var provider = Provider(1, 0.01, available: false, success: 1, now, warning: true);
+    var state = ProviderStatusPresentation.ResolveRoutingState(
+        provider,
+        hasAccountData: true,
+        isAuthorized: true,
+        minimumSuccessRate6h: 0.9,
+        now,
+        TimeSpan.FromMinutes(15));
+    Assert(state == "当前异常", "An unavailable warning provider was shown as routable.");
+}
+
+static void TestRoutingPresentationPreservesAvailabilityThreshold()
+{
+    var now = DateTimeOffset.UtcNow;
+    var provider = Provider(1, 0.01, available: true, success: 0.49, now, warning: true);
+    var state = ProviderStatusPresentation.ResolveRoutingState(
+        provider,
+        hasAccountData: true,
+        isAuthorized: true,
+        minimumSuccessRate6h: 0.5,
+        now,
+        TimeSpan.FromMinutes(15));
+    Assert(state == "低于阈值", "Warning decoration bypassed the local availability threshold.");
 }
 
 static void TestStaleStatusRejection()
@@ -415,6 +456,46 @@ static void TestUndefinedScoreDoesNotBlockSwitch()
         observedCurrentGroupId: 1);
     Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 2,
         "An undefined weighted score blocked a zero-price route.");
+}
+
+static void TestZeroPriceTieDoesNotInvokeStabilityHold()
+{
+    var now = DateTimeOffset.UtcNow;
+    var policy = Policy(RoutingMode.Economy);
+    var evaluation = RoutingEngine.Evaluate(
+        [Provider(1, 0, true, 0.99, now, 1_000), Provider(2, 0, true, 0.99, now, 500)],
+        [Group(1), Group(2)],
+        new Dictionary<long, double>(),
+        policy,
+        now);
+    var result = RouteDecisionEngine.Decide(
+        evaluation,
+        new RouteState { CurrentGroupId = 1 },
+        policy,
+        now,
+        observedCurrentGroupId: 1);
+    Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 2,
+        "Placeholder zero-price scores incorrectly triggered the stability hold.");
+}
+
+static void TestUnknownLatencyTieDoesNotInvokeStabilityHold()
+{
+    var now = DateTimeOffset.UtcNow;
+    var policy = Policy(RoutingMode.Balanced);
+    var evaluation = RoutingEngine.Evaluate(
+        [Provider(1, 0.02, true, 0.99, now, null), Provider(2, 0.02, true, 0.99, now, null)],
+        [Group(1), Group(2)],
+        new Dictionary<long, double>(),
+        policy,
+        now);
+    var result = RouteDecisionEngine.Decide(
+        evaluation,
+        new RouteState { CurrentGroupId = 2 },
+        policy,
+        now,
+        observedCurrentGroupId: 2);
+    Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 1,
+        "Placeholder unknown-latency scores incorrectly triggered the stability hold.");
 }
 
 static void TestMissingLatencyRanksLast()

@@ -2,6 +2,28 @@ namespace AIHubRouter.Core;
 
 public static class ProviderStatusPresentation
 {
+    public static string ResolveRoutingState(
+        ProviderStatus provider,
+        bool hasAccountData,
+        bool isAuthorized,
+        double minimumSuccessRate6h,
+        DateTimeOffset now,
+        TimeSpan maximumStatusAge)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        var isFresh = provider.CheckedAt is { } checkedAt &&
+            now - checkedAt >= TimeSpan.FromMinutes(-1) &&
+            now - checkedAt <= maximumStatusAge;
+        var state = !provider.Enabled ? "已停用"
+            : !provider.Available ? "当前异常"
+            : !isFresh ? "数据过期"
+            : (provider.SuccessRate6h ?? 0) < minimumSuccessRate6h ? "低于阈值"
+            : hasAccountData && !isAuthorized ? "账号不可用"
+            : !hasAccountData ? "待认证"
+            : "可路由";
+        return DecorateRoutableState(state, provider);
+    }
+
     public static string DecorateRoutableState(string state, ProviderStatus provider)
     {
         ArgumentNullException.ThrowIfNull(state);
