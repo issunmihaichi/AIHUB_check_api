@@ -73,27 +73,32 @@ public static class RouteDecisionEngine
                 "当前路由已不可用");
         }
 
-        if (current.Group.Id == target.Group.Id)
+        var selected = SelectAdaptiveTarget(
+            current,
+            evaluation.EligibleCandidates,
+            context,
+            effectivePreference);
+        if (selected is null)
         {
-            return Enrich(
-                Result(current, target, false, RouteDecisionReason.AlreadyOptimal,
-                    new RouteState { CurrentGroupId = current.Group.Id }, premium, 0, now),
-                context,
-                effectivePreference,
-                adaptiveDecision: null,
-                "当前路由已是最优");
+            if (current.Group.Id == target.Group.Id)
+            {
+                return Enrich(
+                    Result(current, target, false, RouteDecisionReason.AlreadyOptimal,
+                        new RouteState { CurrentGroupId = current.Group.Id }, premium, 0, now),
+                    context,
+                    effectivePreference,
+                    adaptiveDecision: null,
+                    "当前路由已是最优");
+            }
+
+            selected = new AdaptiveCandidateSelection(
+                target,
+                EvaluateAdaptiveDecision(current, target, context));
         }
 
-        var adaptiveDecision = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
-            current.EffectiveMultiplier,
-            target.EffectiveMultiplier,
-            ToSeconds(current.Provider.FirstTokenLatencyMs),
-            ToSeconds(target.Provider.FirstTokenLatencyMs),
-            current.Provider.OutputTokensPerSecond ?? 0,
-            target.Provider.OutputTokensPerSecond ?? 0,
-            context.DurationCategory,
-            AdaptiveSwitchDecisionEngine.ToPreference(context.BaseMode),
-            context.CurrentIntervalSeconds));
+        target = selected.Candidate;
+        premium = CalculatePremium(evaluation.MinimumMultiplier, target.EffectiveMultiplier);
+        var adaptiveDecision = selected.Decision;
         var latencyImprovement = CalculateLatencyImprovement(
             current.Provider.FirstTokenLatencyMs,
             target.Provider.FirstTokenLatencyMs);
@@ -170,6 +175,64 @@ public static class RouteDecisionEngine
             .ThenBy(candidate => RoutingEngine.NormalizeLatency(candidate.Provider.FirstTokenLatencyMs))
             .ThenBy(candidate => candidate.Group.Id)
             .FirstOrDefault();
+
+    private static AdaptiveCandidateSelection? SelectAdaptiveTarget(
+        RouteCandidate current,
+        IEnumerable<RouteCandidate> candidates,
+        AdaptiveRoutingContext context,
+        AdaptivePreference effectivePreference)
+    {
+        var accepted = candidates
+            .Where(candidate => candidate.Group.Id != current.Group.Id)
+            .Select(candidate => new AdaptiveCandidateSelection(
+                candidate,
+                EvaluateAdaptiveDecision(current, candidate, context)))
+            .Where(selection => selection.Decision.ShouldSwitch)
+            .ToArray();
+
+        return effectivePreference switch
+        {
+            AdaptivePreference.Cost => accepted
+                .OrderByDescending(selection => selection.Decision.NetSavingUsd)
+                .ThenBy(selection => selection.Decision.NewCompletionSeconds)
+                .ThenBy(selection => selection.Candidate.EffectiveMultiplier)
+                .ThenBy(selection => selection.Candidate.Group.Id)
+                .FirstOrDefault(),
+            AdaptivePreference.Balanced => accepted
+                .OrderByDescending(selection => selection.Decision.NetSavingUsd)
+                .ThenBy(selection => selection.Decision.NewCompletionSeconds)
+                .ThenBy(selection => selection.Candidate.EffectiveMultiplier)
+                .ThenBy(selection => selection.Candidate.Group.Id)
+                .FirstOrDefault(),
+            AdaptivePreference.Speed => accepted
+                .OrderBy(selection => selection.Decision.NewCompletionSeconds)
+                .ThenByDescending(selection => selection.Candidate.Provider.OutputTokensPerSecond ?? 0)
+                .ThenByDescending(selection => selection.Decision.NetSavingUsd)
+                .ThenBy(selection => selection.Candidate.EffectiveMultiplier)
+                .ThenBy(selection => selection.Candidate.Group.Id)
+                .FirstOrDefault(),
+            _ => null
+        };
+    }
+
+    private static AdaptiveSwitchDecision EvaluateAdaptiveDecision(
+        RouteCandidate current,
+        RouteCandidate candidate,
+        AdaptiveRoutingContext context) =>
+        AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+            current.EffectiveMultiplier,
+            candidate.EffectiveMultiplier,
+            ToSeconds(current.Provider.FirstTokenLatencyMs),
+            ToSeconds(candidate.Provider.FirstTokenLatencyMs),
+            current.Provider.OutputTokensPerSecond ?? 0,
+            candidate.Provider.OutputTokensPerSecond ?? 0,
+            context.DurationCategory,
+            AdaptiveSwitchDecisionEngine.ToPreference(context.BaseMode),
+            context.CurrentIntervalSeconds));
+
+    private sealed record AdaptiveCandidateSelection(
+        RouteCandidate Candidate,
+        AdaptiveSwitchDecision Decision);
 
     private static RouteDecisionResult Switched(
         RouteCandidate? current,
