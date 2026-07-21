@@ -1,4 +1,43 @@
+using System.Globalization;
+
 namespace AIHubRouter.Core;
+
+public sealed record AdaptiveSwitchRequest(
+    double OldMultiplier,
+    double NewMultiplier,
+    double OldTtftSeconds,
+    double NewTtftSeconds,
+    double OldGenerationSpeed,
+    double NewGenerationSpeed,
+    TaskDurationCategory DurationCategory,
+    AdaptivePreference BasePreference,
+    double? CurrentIntervalSeconds);
+
+public enum AdaptiveDecisionReason
+{
+    AcceptedCost,
+    AcceptedBalanced,
+    AcceptedSpeed,
+    NewPriceNotLower,
+    ShortTaskProtected,
+    RemainingWorkTooSmall,
+    CostGuardRejected,
+    BalancedGuardRejected,
+    SpeedGuardRejected,
+    UnknownPreference
+}
+
+public sealed record AdaptiveSwitchDecision(
+    bool ShouldSwitch,
+    AdaptiveDecisionReason Reason,
+    AdaptivePreference EffectivePreference,
+    double RemainingTokens,
+    double PenaltyUsd,
+    double NetSavingUsd,
+    double OldCompletionSeconds,
+    double NewCompletionSeconds,
+    double DeltaSeconds,
+    string Detail);
 
 public static class AdaptiveRoutingConstants
 {
@@ -69,6 +108,119 @@ public static class AdaptiveSwitchDecisionEngine
         return AdaptivePreference.Cost;
     }
 
+    public static double CalculatePenalty(double newMultiplier) =>
+        AdaptiveRoutingConstants.PenaltyTokens * newMultiplier *
+        AdaptiveRoutingConstants.InputPricePerMillion / 1_000_000;
+
+    public static double CalculateCompletionTime(
+        double ttftSeconds,
+        double generationSpeed,
+        double remainingTokens)
+    {
+        if (!double.IsFinite(ttftSeconds) || ttftSeconds < 0 ||
+            !double.IsFinite(generationSpeed) || generationSpeed <= 0 ||
+            !double.IsFinite(remainingTokens) || remainingTokens < 0)
+        {
+            return double.PositiveInfinity;
+        }
+
+        var completion = ttftSeconds + remainingTokens / generationSpeed;
+        return double.IsFinite(completion) ? completion : double.PositiveInfinity;
+    }
+
+    public static double CalculateNetSaving(
+        double oldMultiplier,
+        double newMultiplier,
+        double remainingTokens)
+    {
+        if (newMultiplier >= oldMultiplier)
+        {
+            return double.NegativeInfinity;
+        }
+
+        var outputSaving = remainingTokens * (oldMultiplier - newMultiplier) *
+            AdaptiveRoutingConstants.OutputPricePerMillion / 1_000_000;
+        return outputSaving - CalculatePenalty(newMultiplier);
+    }
+
+    public static AdaptiveSwitchDecision Decide(AdaptiveSwitchRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var effectivePreference = ResolveEffectivePreference(
+            request.CurrentIntervalSeconds,
+            request.BasePreference);
+        var penalty = CalculatePenalty(request.NewMultiplier);
+
+        if (request.NewMultiplier >= request.OldMultiplier &&
+            effectivePreference != AdaptivePreference.Speed)
+        {
+            return Rejected(
+                AdaptiveDecisionReason.NewPriceNotLower,
+                effectivePreference,
+                penalty,
+                "新价格未降低");
+        }
+
+        if (request.DurationCategory == TaskDurationCategory.Short &&
+            effectivePreference != AdaptivePreference.Cost)
+        {
+            return Rejected(
+                AdaptiveDecisionReason.ShortTaskProtected,
+                effectivePreference,
+                penalty,
+                "短任务且非空闲状态，避免切换风险");
+        }
+
+        var config = AdaptiveRoutingConstants.Duration(request.DurationCategory);
+        var remainingTokens = effectivePreference == AdaptivePreference.Cost
+            ? config.MaximumRemainingTokens
+            : config.MinimumRemainingTokens;
+        if (remainingTokens <= AdaptiveRoutingConstants.MinimumUsefulRemainingTokens)
+        {
+            return Rejected(
+                AdaptiveDecisionReason.RemainingWorkTooSmall,
+                effectivePreference,
+                penalty,
+                "剩余工作量极少，不值得切换",
+                remainingTokens);
+        }
+
+        var netSaving = CalculateNetSaving(
+            request.OldMultiplier,
+            request.NewMultiplier,
+            remainingTokens);
+        var oldCompletion = CalculateCompletionTime(
+            request.OldTtftSeconds,
+            request.OldGenerationSpeed,
+            remainingTokens);
+        var newCompletion = CalculateCompletionTime(
+            request.NewTtftSeconds,
+            request.NewGenerationSpeed,
+            remainingTokens);
+        var delta = newCompletion - oldCompletion;
+
+        return effectivePreference switch
+        {
+            AdaptivePreference.Cost => DecideCost(
+                remainingTokens, penalty, netSaving, oldCompletion, newCompletion, delta),
+            AdaptivePreference.Balanced => DecideBalanced(
+                request, config, remainingTokens, penalty, netSaving, oldCompletion, newCompletion, delta),
+            AdaptivePreference.Speed => DecideSpeed(
+                request, remainingTokens, penalty, netSaving, oldCompletion, newCompletion, delta),
+            _ => Decision(
+                false,
+                AdaptiveDecisionReason.UnknownPreference,
+                effectivePreference,
+                remainingTokens,
+                penalty,
+                netSaving,
+                oldCompletion,
+                newCompletion,
+                delta,
+                "未知偏好")
+        };
+    }
+
     public static double? ResolveCurrentIntervalSeconds(
         IEnumerable<ProviderStatus> providers,
         long? currentGroupId,
@@ -106,4 +258,135 @@ public static class AdaptiveSwitchDecisionEngine
 
         return Math.Max(0, (now - lastCall).TotalSeconds);
     }
+
+    private static AdaptiveSwitchDecision DecideCost(
+        double remainingTokens,
+        double penalty,
+        double netSaving,
+        double oldCompletion,
+        double newCompletion,
+        double delta)
+    {
+        var accepted = netSaving > 0 &&
+            newCompletion < AdaptiveRoutingConstants.MaximumCostCompletionSeconds;
+        return Decision(
+            accepted,
+            accepted ? AdaptiveDecisionReason.AcceptedCost : AdaptiveDecisionReason.CostGuardRejected,
+            AdaptivePreference.Cost,
+            remainingTokens,
+            penalty,
+            netSaving,
+            oldCompletion,
+            newCompletion,
+            delta,
+            accepted
+                ? $"净省 ${Format(netSaving, "0.0000")}，时间变化 {FormatSeconds(delta)}"
+                : "净省不足或新节点过慢");
+    }
+
+    private static AdaptiveSwitchDecision DecideBalanced(
+        AdaptiveSwitchRequest request,
+        DurationConfiguration config,
+        double remainingTokens,
+        double penalty,
+        double netSaving,
+        double oldCompletion,
+        double newCompletion,
+        double delta)
+    {
+        var savingIsEnough = netSaving > 0.5 * penalty;
+        var timeIsAcceptable = newCompletion < config.ExpectedCompletionSeconds ||
+            delta < 0.1 * oldCompletion;
+        var priceReductionIsEnough = request.OldMultiplier > 0 &&
+            (request.OldMultiplier - request.NewMultiplier) / request.OldMultiplier > 0.05;
+        var accepted = savingIsEnough && timeIsAcceptable && priceReductionIsEnough;
+        return Decision(
+            accepted,
+            accepted ? AdaptiveDecisionReason.AcceptedBalanced : AdaptiveDecisionReason.BalancedGuardRejected,
+            AdaptivePreference.Balanced,
+            remainingTokens,
+            penalty,
+            netSaving,
+            oldCompletion,
+            newCompletion,
+            delta,
+            accepted ? "净省及时间均满足条件" : "净省不足或时间超标或降价不够");
+    }
+
+    private static AdaptiveSwitchDecision DecideSpeed(
+        AdaptiveSwitchRequest request,
+        double remainingTokens,
+        double penalty,
+        double netSaving,
+        double oldCompletion,
+        double newCompletion,
+        double delta)
+    {
+        var speedBoost = double.IsFinite(request.OldGenerationSpeed) &&
+            double.IsFinite(request.NewGenerationSpeed) &&
+            request.OldGenerationSpeed > 0 &&
+            request.NewGenerationSpeed > request.OldGenerationSpeed * 1.2;
+        var priceOkForSpeed = request.NewMultiplier <= request.OldMultiplier * 1.1;
+        var endToEndFaster = delta < -30;
+        var priceNotHigher = request.NewMultiplier <= request.OldMultiplier;
+        var accepted = speedBoost && priceOkForSpeed || endToEndFaster && priceNotHigher;
+        return Decision(
+            accepted,
+            accepted ? AdaptiveDecisionReason.AcceptedSpeed : AdaptiveDecisionReason.SpeedGuardRejected,
+            AdaptivePreference.Speed,
+            remainingTokens,
+            penalty,
+            netSaving,
+            oldCompletion,
+            newCompletion,
+            delta,
+            accepted ? "速度提升显著，接受切换" : "速度提升不足或涨价过多");
+    }
+
+    private static AdaptiveSwitchDecision Rejected(
+        AdaptiveDecisionReason reason,
+        AdaptivePreference preference,
+        double penalty,
+        string detail,
+        double remainingTokens = 0) =>
+        Decision(
+            false,
+            reason,
+            preference,
+            remainingTokens,
+            penalty,
+            double.NegativeInfinity,
+            double.PositiveInfinity,
+            double.PositiveInfinity,
+            double.NaN,
+            detail);
+
+    private static AdaptiveSwitchDecision Decision(
+        bool shouldSwitch,
+        AdaptiveDecisionReason reason,
+        AdaptivePreference preference,
+        double remainingTokens,
+        double penalty,
+        double netSaving,
+        double oldCompletion,
+        double newCompletion,
+        double delta,
+        string detail) =>
+        new(
+            shouldSwitch,
+            reason,
+            preference,
+            remainingTokens,
+            penalty,
+            netSaving,
+            oldCompletion,
+            newCompletion,
+            delta,
+            detail);
+
+    private static string FormatSeconds(double seconds) =>
+        double.IsFinite(seconds) ? $"{Format(seconds, "0.0")} 秒" : "不可估算";
+
+    private static string Format(double value, string format) =>
+        value.ToString(format, CultureInfo.InvariantCulture);
 }

@@ -17,6 +17,16 @@ var tests = new (string Name, Action Body)[]
     ("Adaptive preference follows interval boundaries", TestAdaptivePreferenceBoundaries),
     ("Current-group interval uses latest provider call", TestCurrentGroupIntervalResolution),
     ("Missing call time retains base preference", TestMissingCallTimeRetainsBasePreference),
+    ("Adaptive penalty uses new multiplier", TestAdaptivePenalty),
+    ("Adaptive completion time includes TTFT", TestAdaptiveCompletionTime),
+    ("Adaptive net saving subtracts context penalty", TestAdaptiveNetSaving),
+    ("Adaptive cost accepts positive saving", TestAdaptiveCostAcceptsPositiveSaving),
+    ("Adaptive cost rejects slow candidate", TestAdaptiveCostRejectsSlowCandidate),
+    ("Adaptive balanced requires all safeguards", TestAdaptiveBalancedSafeguards),
+    ("Adaptive speed accepts generation boost", TestAdaptiveSpeedAcceptsGenerationBoost),
+    ("Adaptive speed accepts end-to-end gain", TestAdaptiveSpeedAcceptsEndToEndGain),
+    ("Adaptive short task is protected outside cost", TestAdaptiveShortTaskProtection),
+    ("Adaptive invalid performance cannot switch", TestAdaptiveInvalidPerformance),
     ("Warning provider remains eligible", TestWarningProviderRemainsEligible),
     ("Latest unavailable state remains ineligible", TestLatestUnavailableStateRemainsIneligible),
     ("Warning presentation excludes server message", TestWarningPresentationExcludesServerMessage),
@@ -268,6 +278,119 @@ static void TestMissingCallTimeRetainsBasePreference()
         currentIntervalSeconds: null,
         basePreference: AdaptivePreference.Balanced);
     Assert(preference == AdaptivePreference.Balanced, "A missing call timestamp fabricated an interval override.");
+}
+
+static void TestAdaptivePenalty()
+{
+    var penalty = AdaptiveSwitchDecisionEngine.CalculatePenalty(0.02);
+    Assert(Math.Abs(penalty - 0.03) < 1e-12, "The context-miss penalty did not use the new multiplier.");
+}
+
+static void TestAdaptiveCompletionTime()
+{
+    var completion = AdaptiveSwitchDecisionEngine.CalculateCompletionTime(2, 20, 100);
+    Assert(Math.Abs(completion - 7) < 1e-12, "TTFT was not included in completion time.");
+    Assert(double.IsPositiveInfinity(AdaptiveSwitchDecisionEngine.CalculateCompletionTime(2, 0, 100)),
+        "A non-positive generation speed did not produce infinite completion time.");
+}
+
+static void TestAdaptiveNetSaving()
+{
+    var saving = AdaptiveSwitchDecisionEngine.CalculateNetSaving(0.02, 0.01, 313_920);
+    Assert(Math.Abs(saving - 0.079176) < 1e-12, "Net saving did not subtract the context penalty.");
+    Assert(double.IsNegativeInfinity(AdaptiveSwitchDecisionEngine.CalculateNetSaving(0.01, 0.01, 313_920)),
+        "A non-lower price did not produce negative infinite saving.");
+}
+
+static void TestAdaptiveCostAcceptsPositiveSaving()
+{
+    var result = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        0.02, 0.01, 1, 1, 20, 20,
+        TaskDurationCategory.Short, AdaptivePreference.Cost, 31));
+
+    Assert(result.ShouldSwitch && result.Reason == AdaptiveDecisionReason.AcceptedCost,
+        "Cost mode rejected a positive net saving within the completion cap.");
+    Assert(result.RemainingTokens == 78_480 && result.NetSavingUsd > 0,
+        "Cost mode did not use the optimistic Short token estimate.");
+}
+
+static void TestAdaptiveCostRejectsSlowCandidate()
+{
+    var exactBoundarySpeed = 78_480d / AdaptiveRoutingConstants.MaximumCostCompletionSeconds;
+    var result = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        0.02, 0.01, 0, 0, 20, exactBoundarySpeed,
+        TaskDurationCategory.Short, AdaptivePreference.Cost, 31));
+
+    Assert(!result.ShouldSwitch && result.Reason == AdaptiveDecisionReason.CostGuardRejected,
+        "Cost mode accepted a candidate at the strict 24-hour boundary.");
+}
+
+static void TestAdaptiveBalancedSafeguards()
+{
+    var accepted = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        0.05, 0.02, 1, 1, 20, 20,
+        TaskDurationCategory.Medium, AdaptivePreference.Balanced, 10));
+    var slow = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        0.05, 0.02, 1, 1, 20, 5,
+        TaskDurationCategory.Medium, AdaptivePreference.Balanced, 10));
+    var exactFivePercent = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        0.02, 0.019, 1, 1, 20, 20,
+        TaskDurationCategory.Medium, AdaptivePreference.Balanced, 10));
+
+    Assert(accepted.ShouldSwitch && accepted.Reason == AdaptiveDecisionReason.AcceptedBalanced,
+        "Balanced mode rejected a candidate satisfying every safeguard.");
+    Assert(!slow.ShouldSwitch && slow.Reason == AdaptiveDecisionReason.BalancedGuardRejected,
+        "Balanced mode accepted an excessive completion delay.");
+    Assert(!exactFivePercent.ShouldSwitch,
+        "Balanced mode accepted the strict five-percent price boundary.");
+}
+
+static void TestAdaptiveSpeedAcceptsGenerationBoost()
+{
+    var accepted = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        10, 11, 1, 1, 20, 24.01,
+        TaskDurationCategory.Medium, AdaptivePreference.Speed, 2));
+    var exactBoundary = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        10, 11, 1, 1, 20, 24,
+        TaskDurationCategory.Medium, AdaptivePreference.Speed, 2));
+
+    Assert(accepted.ShouldSwitch && accepted.Reason == AdaptiveDecisionReason.AcceptedSpeed,
+        "Speed mode rejected a generation boost above twenty percent at the price cap.");
+    Assert(!exactBoundary.ShouldSwitch,
+        "Speed mode accepted the strict 120-percent generation boundary.");
+}
+
+static void TestAdaptiveSpeedAcceptsEndToEndGain()
+{
+    var accepted = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        0.02, 0.02, 32, 1, 20, 20,
+        TaskDurationCategory.Medium, AdaptivePreference.Speed, 2));
+    var exactBoundary = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        0.02, 0.02, 31, 1, 20, 20,
+        TaskDurationCategory.Medium, AdaptivePreference.Speed, 2));
+
+    Assert(accepted.ShouldSwitch, "Speed mode rejected an end-to-end gain above thirty seconds.");
+    Assert(!exactBoundary.ShouldSwitch, "Speed mode accepted the strict thirty-second boundary.");
+}
+
+static void TestAdaptiveShortTaskProtection()
+{
+    var result = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        0.05, 0.01, 1, 1, 20, 40,
+        TaskDurationCategory.Short, AdaptivePreference.Balanced, 10));
+
+    Assert(!result.ShouldSwitch && result.Reason == AdaptiveDecisionReason.ShortTaskProtected,
+        "A short task switched outside Cost mode.");
+}
+
+static void TestAdaptiveInvalidPerformance()
+{
+    var result = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        0.05, 0.02, 1, double.NaN, 20, 20,
+        TaskDurationCategory.Medium, AdaptivePreference.Balanced, 10));
+
+    Assert(!result.ShouldSwitch && result.Reason == AdaptiveDecisionReason.BalancedGuardRejected,
+        "Invalid performance data accidentally satisfied the Balanced safeguards.");
 }
 
 static void TestWarningProviderRemainsEligible()
