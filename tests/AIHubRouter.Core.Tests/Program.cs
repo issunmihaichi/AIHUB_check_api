@@ -17,6 +17,7 @@ var tests = new (string Name, Action Body)[]
     ("Warning presentation excludes server message", TestWarningPresentationExcludesServerMessage),
     ("Warning decoration requires routable latest state", TestWarningDecorationRequiresRoutableLatestState),
     ("Routing presentation preserves availability threshold", TestRoutingPresentationPreservesAvailabilityThreshold),
+    ("Routing presentation rejects invalid effective rate", TestRoutingPresentationRejectsInvalidEffectiveRate),
     ("Stale status rejection", TestStaleStatusRejection),
     ("Routing preferences default to Win32-compatible values", TestRoutingPreferenceDefaults),
     ("Routing preferences roundtrip", TestRoutingPreferenceRoundtrip),
@@ -238,9 +239,10 @@ static void TestWarningDecorationRequiresRoutableLatestState()
         provider,
         hasAccountData: true,
         isAuthorized: true,
+        effectiveMultiplier: provider.PriceMultiplier,
         minimumSuccessRate6h: 0.9,
-        now,
-        TimeSpan.FromMinutes(15));
+        now: now,
+        maximumStatusAge: TimeSpan.FromMinutes(15));
     Assert(state == "当前异常", "An unavailable warning provider was shown as routable.");
 }
 
@@ -252,10 +254,26 @@ static void TestRoutingPresentationPreservesAvailabilityThreshold()
         provider,
         hasAccountData: true,
         isAuthorized: true,
+        effectiveMultiplier: provider.PriceMultiplier,
         minimumSuccessRate6h: 0.5,
-        now,
-        TimeSpan.FromMinutes(15));
+        now: now,
+        maximumStatusAge: TimeSpan.FromMinutes(15));
     Assert(state == "低于阈值", "Warning decoration bypassed the local availability threshold.");
+}
+
+static void TestRoutingPresentationRejectsInvalidEffectiveRate()
+{
+    var now = DateTimeOffset.UtcNow;
+    var provider = Provider(1, 0.01, available: true, success: 1, now, warning: true);
+    var state = ProviderStatusPresentation.ResolveRoutingState(
+        provider,
+        hasAccountData: true,
+        isAuthorized: true,
+        effectiveMultiplier: -0.1,
+        minimumSuccessRate6h: 0.9,
+        now: now,
+        maximumStatusAge: TimeSpan.FromMinutes(15));
+    Assert(state == "倍率无效", "An invalid effective rate was shown as routable.");
 }
 
 static void TestStaleStatusRejection()

@@ -324,9 +324,16 @@ internal sealed partial class MainForm : Form
                     : groupId is { } currentGroupId && currentGroupId == result.Decision.Current?.Group.Id ? "当前"
                     : groupId is { } baselineGroupId && baselineGroupId == result.Evaluation.Baseline?.Group.Id ? "最低价"
                     : string.Empty;
-                var effective = groupId is { } effectiveGroup && candidateLookup.TryGetValue(effectiveGroup, out var candidate)
-                    ? $"{candidate.EffectiveMultiplier:0.####}{(candidate.HasUserRateOverride ? " *" : string.Empty)}"
-                    : $"{provider.PriceMultiplier:0.####}";
+                var overrideRate = 0d;
+                var hasOverride = groupId is { } overrideGroupId && _userRates.TryGetValue(overrideGroupId, out overrideRate);
+                var effectiveMultiplier = hasOverride ? overrideRate : provider.PriceMultiplier;
+                if (groupId is { } effectiveGroup && candidateLookup.TryGetValue(effectiveGroup, out var candidate))
+                {
+                    effectiveMultiplier = candidate.EffectiveMultiplier;
+                    hasOverride = candidate.HasUserRateOverride;
+                }
+
+                var effective = $"{effectiveMultiplier:0.####}{(hasOverride ? " *" : string.Empty)}";
                 return new ProviderGridRow
                 {
                     Source = provider,
@@ -338,9 +345,10 @@ internal sealed partial class MainForm : Form
                         provider,
                         hasAccountData: true,
                         isAuthorized: groupId is { } authorizedId && groupLookup.ContainsKey(authorizedId),
-                        minimumSuccessRate6h,
-                        result.Decision.EvaluatedAt,
-                        maximumStatusAge)
+                        effectiveMultiplier: effectiveMultiplier,
+                        minimumSuccessRate6h: minimumSuccessRate6h,
+                        now: result.Decision.EvaluatedAt,
+                        maximumStatusAge: maximumStatusAge)
                 };
             })
             .OrderByDescending(row => row.IsBest)
@@ -596,10 +604,11 @@ internal sealed partial class MainForm : Form
                     State = ProviderStatusPresentation.ResolveRoutingState(
                         provider,
                         hasAccountData: _groups.Count > 0,
-                        isAuthorized,
-                        criteria.MinimumSuccessRate6h,
-                        now,
-                        criteria.MaximumStatusAge)
+                        isAuthorized: isAuthorized,
+                        effectiveMultiplier: effectiveRate,
+                        minimumSuccessRate6h: criteria.MinimumSuccessRate6h,
+                        now: now,
+                        maximumStatusAge: criteria.MaximumStatusAge)
                 };
             })
             .OrderByDescending(row => row.IsBest)
