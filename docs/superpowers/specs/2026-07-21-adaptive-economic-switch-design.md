@@ -65,11 +65,15 @@ Provider eligibility remains unchanged: enabled, latest available state,
 authorized group, platform, valid public/effective multiplier, freshness, and
 the configured 6-hour success threshold are all required.
 
-The existing evaluator continues to propose a candidate, but evaluates with
-the effective preference so interval overrides affect candidate ranking. Cost
-uses the evaluator's strict lowest-price baseline. Balanced and Speed use the
-corresponding weighted recommendation. This keeps selection deterministic and
-lets the new engine own the final pairwise switch decision.
+The existing evaluator still calculates its deterministic score for display
+and for initial/invalid-route recovery, but that score is only a reference
+once a current route is valid. The decision engine traverses every eligible
+candidate, applies the adaptive pairwise guard to each one, discards rejected
+candidates, and then selects among accepted candidates deterministically:
+Cost/Balanced maximize net saving (then completion time and multiplier), while
+Speed minimizes completion time (then generation speed and net saving). This
+allows a candidate beyond the weighted winner to be selected when it is the
+one that satisfies the supplied algorithm.
 
 ## Pairwise Switch Engine
 

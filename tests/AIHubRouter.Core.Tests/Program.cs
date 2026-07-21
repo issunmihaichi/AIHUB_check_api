@@ -43,11 +43,12 @@ var tests = new (string Name, Action Body)[]
     ("Speed mode accepts larger price premium", TestSpeedModeAcceptsLargerPremium),
     ("Selective policy preserves local routing weights", TestSelectivePolicyPreservesLocalWeights),
     ("Cost mode proposes strict cheapest candidate", TestCostModeProposesCheapest),
-    ("Cost mode does not skip cheapest unknown TTFT", TestCostModeKeepsStrictPriceOrderWithUnknownTtft),
+    ("Cost mode falls back when cheapest TTFT is unknown", TestCostModeFallsBackWhenCheapestTtftIsUnknown),
     ("Frequent calls override economy with speed", TestFrequentCallsOverrideEconomy),
     ("Idle calls override speed with cost", TestIdleCallsOverrideSpeed),
     ("Adaptive rejection keeps current group", TestAdaptiveRejectionKeepsCurrentGroup),
     ("Adaptive acceptance updates selected Keys", TestAdaptiveAcceptanceUpdatesKeys),
+    ("Adaptive traversal finds an accepted candidate beyond weighted winner", TestAdaptiveTraversalFindsAcceptedCandidateBeyondWeightedWinner),
     ("Initial and invalid routes recover immediately", TestAdaptiveRecoveryBypassesGuard),
     ("Missing latency ranks last", TestMissingLatencyRanksLast),
     ("Invalid measurements are excluded", TestInvalidMeasurementsAreExcluded),
@@ -644,7 +645,7 @@ static void TestCostModeProposesCheapest()
         "Cost mode did not select the strict lowest-price baseline.");
 }
 
-static void TestCostModeKeepsStrictPriceOrderWithUnknownTtft()
+static void TestCostModeFallsBackWhenCheapestTtftIsUnknown()
 {
     var now = DateTimeOffset.UtcNow;
     var evaluation = RoutingEngine.Evaluate(
@@ -668,10 +669,10 @@ static void TestCostModeKeepsStrictPriceOrderWithUnknownTtft()
         now,
         observedCurrentGroupId: 3);
 
-    Assert(!result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 3,
-        "Cost mode skipped the strict cheapest candidate and switched to a pricier measured group.");
-    Assert(result.Decision.Reason == RouteDecisionReason.AdaptiveCostRejected,
-        "Unknown cheapest TTFT did not fail the Cost completion guard.");
+    Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 2,
+        "Cost mode did not fall back to the cheapest candidate with valid completion metrics.");
+    Assert(result.Decision.Reason == RouteDecisionReason.AdaptiveCostAccepted,
+        "Cost fallback did not preserve the accepted adaptive reason.");
 }
 
 static void TestFrequentCallsOverrideEconomy()
@@ -782,6 +783,49 @@ static void TestAdaptiveAcceptanceUpdatesKeys()
     Assert(result.Decision.EffectivePreference == AdaptivePreference.Balanced &&
         result.Decision.CurrentIntervalSeconds == 10,
         "The service did not expose the interval-derived effective preference.");
+}
+
+static void TestAdaptiveTraversalFindsAcceptedCandidateBeyondWeightedWinner()
+{
+    var now = DateTimeOffset.UtcNow;
+    var current = new RouteCandidate(
+        Provider(1, 0.10, true, 0.99, now, 1_000, outputTps: 100),
+        Group(1),
+        0.10,
+        false);
+    var weightedWinner = new RouteCandidate(
+        Provider(2, 0.09, true, 0.99, now, 1_000, outputTps: 10),
+        Group(2),
+        0.09,
+        false);
+    var acceptedCandidate = new RouteCandidate(
+        Provider(3, 0.01, true, 0.99, now, 1_000, outputTps: 100),
+        Group(3),
+        0.01,
+        false);
+    var evaluation = new RouteEvaluation(
+        weightedWinner,
+        acceptedCandidate,
+        [current, weightedWinner, acceptedCandidate],
+        new Dictionary<long, double> { [1] = 0, [2] = 1, [3] = 0.2 },
+        0.01,
+        0.80,
+        0.20);
+
+    var result = RouteDecisionEngine.Decide(
+        evaluation,
+        new RouteState { CurrentGroupId = 1 },
+        Policy(RoutingMode.Balanced),
+        new AdaptiveRoutingContext(RoutingMode.Balanced, TaskDurationCategory.Medium, 10),
+        now,
+        observedCurrentGroupId: 1);
+
+    Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 3,
+        "Adaptive traversal did not select the accepted candidate beyond the weighted winner.");
+    Assert(Math.Abs(result.Decision.PricePremiumPercent) < 1e-12,
+        "Adaptive traversal reported the weighted winner's price premium instead of the selected candidate's premium.");
+    Assert(result.Decision.Reason == RouteDecisionReason.AdaptiveBalancedAccepted,
+        "Adaptive traversal did not preserve the accepted decision reason.");
 }
 
 static void TestAdaptiveRecoveryBypassesGuard()
