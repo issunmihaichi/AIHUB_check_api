@@ -4,16 +4,23 @@ namespace AIHubRouter.Core;
 
 public sealed class AIHubApiException : Exception
 {
-    public AIHubApiException(string message, HttpStatusCode? statusCode = null, string? apiCode = null)
+    public AIHubApiException(
+        string message,
+        HttpStatusCode? statusCode = null,
+        string? apiCode = null,
+        bool isAuthenticationRequest = false)
         : base(message)
     {
         StatusCode = statusCode;
         ApiCode = apiCode;
+        IsAuthenticationRequest = isAuthenticationRequest;
     }
 
     public HttpStatusCode? StatusCode { get; }
 
     public string? ApiCode { get; }
+
+    public bool IsAuthenticationRequest { get; }
 
     public bool IsAuthenticationFailure =>
         StatusCode == HttpStatusCode.Unauthorized || IsAuthenticationApiCode(ApiCode);

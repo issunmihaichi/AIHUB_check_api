@@ -110,6 +110,12 @@ internal sealed partial class MainForm : Form
             RecalculateCandidate();
             SaveCurrentSettings(showStatus: false);
         };
+        _durationCombo.SelectedIndexChanged += (_, _) =>
+        {
+            InvalidateRoutingService();
+            RecalculateCandidate();
+            SaveCurrentSettings(showStatus: false);
+        };
         _accountCacheInput.ValueChanged += (_, _) =>
         {
             InvalidateRoutingService();
@@ -355,11 +361,17 @@ internal sealed partial class MainForm : Form
             .ThenBy(row => row.WeightedScore)
             .ToList();
         _providerGrid.DataSource = new BindingList<ProviderGridRow>(rows);
+        var effectiveMode = PreferenceDisplayName(result.Decision.EffectivePreference);
+        var modeText = effectiveMode == ModeDisplayName()
+            ? effectiveMode
+            : $"{ModeDisplayName()}→{effectiveMode}";
         _candidateLabel.Text = result.Decision.Target is { } target
-            ? $"{ModeDisplayName()}：{target.Provider.PlanType}  {target.EffectiveMultiplier:0.####}x"
+            ? $"{modeText}：{target.Provider.PlanType}  {target.EffectiveMultiplier:0.####}x"
             : "当前模式：无符合项";
 
-        var reason = DecisionReasonText(result.Decision.Reason);
+        var reason = string.IsNullOrWhiteSpace(result.Decision.Detail)
+            ? DecisionReasonText(result.Decision.Reason)
+            : result.Decision.Detail;
         var changeText = result.DryRun
             ? $"模拟：{result.ChangedKeyCount} 个 Key 将切换"
             : $"已切换 {result.ChangedKeyCount} 个 Key";
@@ -383,6 +395,7 @@ internal sealed partial class MainForm : Form
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "AIHubRouter", "logs");
             var writer = new AuditLogWriter(Path.Combine(directory, "routing.jsonl"));
+            var adaptive = result.Decision.AdaptiveDecision;
             writer.Write(new RouteAuditEntry(
                 result.CompletedAt,
                 CurrentRoutingMode(),
@@ -400,7 +413,18 @@ internal sealed partial class MainForm : Form
                     key.KeyId,
                     key.Changed,
                     key.Success,
-                    key.Error is null ? null : "update-failed")).ToArray()));
+                    key.Error is null ? null : "update-failed")).ToArray())
+            {
+                EffectivePreference = result.Decision.EffectivePreference,
+                DurationCategory = result.Decision.DurationCategory,
+                CurrentIntervalSeconds = result.Decision.CurrentIntervalSeconds,
+                AdaptiveReason = adaptive?.Reason,
+                PenaltyUsd = adaptive?.PenaltyUsd,
+                NetSavingUsd = adaptive?.NetSavingUsd,
+                OldCompletionSeconds = adaptive?.OldCompletionSeconds,
+                NewCompletionSeconds = adaptive?.NewCompletionSeconds,
+                DeltaSeconds = adaptive?.DeltaSeconds
+            });
         }
         catch
         {
@@ -416,6 +440,7 @@ internal sealed partial class MainForm : Form
             BaseUrl = _baseUrlText.Text.Trim(),
             Platform = _platformCombo.SelectedItem?.ToString() ?? "openai",
             RoutingMode = CurrentRoutingMode(),
+            DurationCategory = CurrentDurationCategory(),
             MinimumSuccessPercent = (int)_minimumSuccessInput.Value,
             PollingIntervalSeconds = (int)_intervalInput.Value,
             AccountCacheSeconds = (int)_accountCacheInput.Value,
@@ -438,6 +463,23 @@ internal sealed partial class MainForm : Form
 
     private string ModeDisplayName() => _routingModeCombo.SelectedItem?.ToString() ?? "经济";
 
+    private TaskDurationCategory CurrentDurationCategory()
+    {
+        return _durationCombo.SelectedIndex switch
+        {
+            0 => TaskDurationCategory.Short,
+            2 => TaskDurationCategory.Long,
+            _ => TaskDurationCategory.Medium
+        };
+    }
+
+    private static string PreferenceDisplayName(AdaptivePreference? preference) => preference switch
+    {
+        AdaptivePreference.Balanced => "均衡",
+        AdaptivePreference.Speed => "速度",
+        _ => "经济"
+    };
+
     private static string DecisionReasonText(RouteDecisionReason reason)
     {
         return reason switch
@@ -449,6 +491,16 @@ internal sealed partial class MainForm : Form
             RouteDecisionReason.ScoreAdvantageTooSmall => "优势较小，保持当前路由",
             RouteDecisionReason.BetterPrice => "发现更低价格",
             RouteDecisionReason.FasterForWeightedTradeoff => "速度收益超过价格增幅",
+            RouteDecisionReason.AdaptiveCostAccepted => "净收益满足省钱切换条件",
+            RouteDecisionReason.AdaptiveBalancedAccepted => "净收益和完成时间满足均衡条件",
+            RouteDecisionReason.AdaptiveSpeedAccepted => "速度提升满足切换条件",
+            RouteDecisionReason.AdaptivePriceNotLower => "新价格未降低",
+            RouteDecisionReason.AdaptiveShortTaskProtected => "短任务保持当前路由",
+            RouteDecisionReason.AdaptiveRemainingWorkTooSmall => "剩余工作量极少",
+            RouteDecisionReason.AdaptiveCostRejected => "净省不足或新节点过慢",
+            RouteDecisionReason.AdaptiveBalancedRejected => "净省、时间或降价未达标",
+            RouteDecisionReason.AdaptiveSpeedRejected => "速度提升不足或涨价过多",
+            RouteDecisionReason.AdaptiveUnknownPreference => "未知路由偏好",
             _ => "路由评估完成"
         };
     }
@@ -511,7 +563,7 @@ internal sealed partial class MainForm : Form
                     throw;
                 }
 
-                failed.Add($"{key.Name}: {GetSafeErrorMessage(exception)}");
+                failed.Add($"{key.Name}: {SafeErrorPresentation.GetMessage(exception)}");
             }
         }
 
@@ -808,6 +860,12 @@ internal sealed partial class MainForm : Form
                 RoutingMode.Speed => 2,
                 _ => 0
             };
+            _durationCombo.SelectedIndex = settings.DurationCategory switch
+            {
+                TaskDurationCategory.Short => 0,
+                TaskDurationCategory.Long => 2,
+                _ => 1
+            };
             _themeCombo.SelectedIndex = settings.Theme switch
             {
                 WinFormsTheme.Light => 1,
@@ -1049,26 +1107,13 @@ internal sealed partial class MainForm : Form
             return;
         }
 
-        var message = GetSafeErrorMessage(exception);
+        var message = SafeErrorPresentation.GetMessage(exception);
         if (_autoRouteCheck.Checked && exception is AIHubApiException { IsAuthenticationFailure: true })
         {
             _autoRouteCheck.Checked = false;
         }
 
         SetStatus(message, success: false);
-    }
-
-    private static string GetSafeErrorMessage(Exception exception)
-    {
-        return exception switch
-        {
-            AIHubApiException apiException => apiException.Message,
-            HttpRequestException => "网络连接失败，请检查站点地址和网络。",
-            TaskCanceledException => "请求超时，请稍后重试。",
-            ArgumentException argumentException => argumentException.Message,
-            InvalidOperationException invalidOperationException => invalidOperationException.Message,
-            _ => $"操作失败：{exception.Message}"
-        };
     }
 
     private static string? FindIdentity(JsonElement element)

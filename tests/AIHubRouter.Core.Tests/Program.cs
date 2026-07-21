@@ -12,6 +12,22 @@ var tests = new (string Name, Action Body)[]
     ("Availability threshold", TestAvailabilityThreshold),
     ("Provider warnings deserialize", TestProviderWarningsDeserialize),
     ("Null provider warnings are tolerated", TestNullProviderWarningsAreTolerated),
+    ("Provider last-call aliases deserialize", TestProviderLastCallAliasesDeserialize),
+    ("Adaptive constants match supplied economics", TestAdaptiveConstants),
+    ("Adaptive preference follows interval boundaries", TestAdaptivePreferenceBoundaries),
+    ("Current-group interval uses latest provider call", TestCurrentGroupIntervalResolution),
+    ("Missing call time retains base preference", TestMissingCallTimeRetainsBasePreference),
+    ("Adaptive penalty uses new multiplier", TestAdaptivePenalty),
+    ("Adaptive completion time includes TTFT", TestAdaptiveCompletionTime),
+    ("Adaptive net saving subtracts context penalty", TestAdaptiveNetSaving),
+    ("Adaptive cost accepts positive saving", TestAdaptiveCostAcceptsPositiveSaving),
+    ("Adaptive cost rejects slow candidate", TestAdaptiveCostRejectsSlowCandidate),
+    ("Adaptive balanced requires all safeguards", TestAdaptiveBalancedSafeguards),
+    ("Adaptive speed accepts generation boost", TestAdaptiveSpeedAcceptsGenerationBoost),
+    ("Adaptive speed accepts end-to-end gain", TestAdaptiveSpeedAcceptsEndToEndGain),
+    ("Adaptive short task is protected outside cost", TestAdaptiveShortTaskProtection),
+    ("Adaptive invalid performance cannot switch", TestAdaptiveInvalidPerformance),
+    ("Adaptive invalid old performance cannot satisfy relative time", TestAdaptiveInvalidOldPerformance),
     ("Warning provider remains eligible", TestWarningProviderRemainsEligible),
     ("Latest unavailable state remains ineligible", TestLatestUnavailableStateRemainsIneligible),
     ("Warning presentation excludes server message", TestWarningPresentationExcludesServerMessage),
@@ -26,18 +42,19 @@ var tests = new (string Name, Action Body)[]
     ("Economy mode protects price", TestEconomyModeProtectsPrice),
     ("Speed mode accepts larger price premium", TestSpeedModeAcceptsLargerPremium),
     ("Selective policy preserves local routing weights", TestSelectivePolicyPreservesLocalWeights),
-    ("Close faster score keeps current group", TestCloseFasterScoreKeepsCurrentGroup),
-    ("Close cheaper score keeps current group", TestCloseCheaperScoreKeepsCurrentGroup),
-    ("Meaningful score advantage still switches", TestMeaningfulScoreAdvantageStillSwitches),
-    ("Undefined score does not block a switch", TestUndefinedScoreDoesNotBlockSwitch),
-    ("Zero-price tie does not invoke stability hold", TestZeroPriceTieDoesNotInvokeStabilityHold),
-    ("Unknown-latency tie does not invoke stability hold", TestUnknownLatencyTieDoesNotInvokeStabilityHold),
+    ("Cost mode proposes strict cheapest candidate", TestCostModeProposesCheapest),
+    ("Cost mode does not skip cheapest unknown TTFT", TestCostModeKeepsStrictPriceOrderWithUnknownTtft),
+    ("Frequent calls override economy with speed", TestFrequentCallsOverrideEconomy),
+    ("Idle calls override speed with cost", TestIdleCallsOverrideSpeed),
+    ("Adaptive rejection keeps current group", TestAdaptiveRejectionKeepsCurrentGroup),
+    ("Adaptive acceptance updates selected Keys", TestAdaptiveAcceptanceUpdatesKeys),
+    ("Initial and invalid routes recover immediately", TestAdaptiveRecoveryBypassesGuard),
     ("Missing latency ranks last", TestMissingLatencyRanksLast),
     ("Invalid measurements are excluded", TestInvalidMeasurementsAreExcluded),
     ("Extreme latency scores stay finite", TestExtremeLatencyScoresStayFinite),
     ("Zero multiplier remains free", TestZeroMultiplierWindow),
     ("Initial route has an explainable reason", TestInitialRouteDecision),
-    ("Weighted speed winner switches immediately", TestWeightedSpeedWinnerSwitchesImmediately),
+    ("Adaptive speed winner switches after guard", TestWeightedSpeedWinnerSwitchesImmediately),
     ("Already optimal route does not switch", TestAlreadyOptimalRouteDecision),
     ("Invalid current route switches", TestInvalidCurrentRouteDecision),
     ("No candidate keeps route state", TestNoCandidateDecision),
@@ -68,6 +85,10 @@ var tests = new (string Name, Action Body)[]
     ("Refresh keeps token when server omits rotation", TestRefreshKeepsTokenWhenServerOmitsRotation),
     ("Authentication error hides server message", TestAuthenticationErrorHidesServerMessage),
     ("Business error hides server message", TestBusinessErrorHidesServerMessage),
+    ("Authentication statuses have safe diagnostics", TestAuthenticationStatusesHaveSafeDiagnostics),
+    ("Business authentication statuses keep business diagnostics", TestBusinessAuthenticationStatusesKeepBusinessDiagnostics),
+    ("Malformed authentication responses retain endpoint context", TestMalformedAuthenticationResponsesRetainEndpointContext),
+    ("Unknown errors do not expose credential text", TestUnknownErrorsDoNotExposeCredentialText),
     ("Interactive login requirement is rejected", TestInteractiveLoginRequirementIsRejected),
     ("Empty key selection roundtrips", TestEmptyKeySelectionRoundtrips),
     ("First key selection chooses first active key", TestFirstKeySelectionChoosesFirstActiveKey),
@@ -184,6 +205,215 @@ static void TestNullProviderWarningsAreTolerated()
     Assert(!provider.HasWarnings, "A null warning list was not treated as empty.");
 }
 
+static void TestProviderLastCallAliasesDeserialize()
+{
+    var providers = JsonSerializer.Deserialize<ProviderStatus[]>("""
+        [
+          {
+            "id":"preferred",
+            "lastCallEndedAt":"2026-07-21T10:00:00Z",
+            "lastCallAt":"2026-07-21T09:00:00Z"
+          },
+          {
+            "id":"compatible",
+            "lastCallAt":"2026-07-21T08:00:00Z"
+          }
+        ]
+        """)!;
+
+    Assert(providers[0].ResolvedLastCallEndedAt == DateTimeOffset.Parse("2026-07-21T10:00:00Z"),
+        "lastCallEndedAt did not take precedence over the compatibility alias.");
+    Assert(providers[1].ResolvedLastCallEndedAt == DateTimeOffset.Parse("2026-07-21T08:00:00Z"),
+        "lastCallAt was not accepted as a compatibility alias.");
+}
+
+static void TestAdaptiveConstants()
+{
+    Assert(AdaptiveRoutingConstants.InputPricePerMillion == 5.0, "Input price constant changed.");
+    Assert(AdaptiveRoutingConstants.OutputPricePerMillion == 30.0, "Output price constant changed.");
+    Assert(AdaptiveRoutingConstants.PenaltyTokens == 300_000, "Penalty token constant changed.");
+
+    var shortConfig = AdaptiveRoutingConstants.Duration(TaskDurationCategory.Short);
+    var mediumConfig = AdaptiveRoutingConstants.Duration(TaskDurationCategory.Medium);
+    var longConfig = AdaptiveRoutingConstants.Duration(TaskDurationCategory.Long);
+    Assert(shortConfig == new DurationConfiguration(0, 78_480, 3_600), "Short duration config changed.");
+    Assert(mediumConfig == new DurationConfiguration(78_480, 313_920, 7_200), "Medium duration config changed.");
+    Assert(longConfig == new DurationConfiguration(313_920, 1_883_520, 21_600), "Long duration config changed.");
+}
+
+static void TestAdaptivePreferenceBoundaries()
+{
+    Assert(AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(4.999, AdaptivePreference.Cost) == AdaptivePreference.Speed,
+        "An interval below five seconds did not force Speed.");
+    Assert(AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(5, AdaptivePreference.Cost) == AdaptivePreference.Cost,
+        "The inclusive five-second boundary did not retain the base preference.");
+    Assert(AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(15, AdaptivePreference.Balanced) == AdaptivePreference.Balanced,
+        "The inclusive fifteen-second boundary did not retain the base preference.");
+    Assert(AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(15.001, AdaptivePreference.Speed) == AdaptivePreference.Balanced,
+        "Moderate idle time did not soften Speed to Balanced.");
+    Assert(AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(15.001, AdaptivePreference.Balanced) == AdaptivePreference.Cost,
+        "Moderate idle time did not shift Balanced to Cost.");
+    Assert(AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(30, AdaptivePreference.Speed) == AdaptivePreference.Balanced,
+        "The inclusive thirty-second boundary did not remain Balanced.");
+    Assert(AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(30.001, AdaptivePreference.Speed) == AdaptivePreference.Cost,
+        "An interval above thirty seconds did not force Cost.");
+}
+
+static void TestCurrentGroupIntervalResolution()
+{
+    var now = DateTimeOffset.Parse("2026-07-21T10:00:00Z");
+    var providers = JsonSerializer.Deserialize<ProviderStatus[]>("""
+        [
+          {"group_id":1,"platform":"openai","lastCallEndedAt":"2026-07-21T09:59:48Z"},
+          {"group_id":1,"platform":"openai","lastCallAt":"2026-07-21T09:59:53Z"},
+          {"group_id":2,"platform":"openai","lastCallEndedAt":"2026-07-21T09:59:59Z"}
+        ]
+        """)!;
+
+    var interval = AdaptiveSwitchDecisionEngine.ResolveCurrentIntervalSeconds(
+        providers,
+        currentGroupId: 1,
+        platform: "openai",
+        now: now);
+    Assert(interval == 7, "A newer call from an unrelated group replaced the current-group interval.");
+}
+
+static void TestMissingCallTimeRetainsBasePreference()
+{
+    var preference = AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(
+        currentIntervalSeconds: null,
+        basePreference: AdaptivePreference.Balanced);
+    Assert(preference == AdaptivePreference.Balanced, "A missing call timestamp fabricated an interval override.");
+}
+
+static void TestAdaptivePenalty()
+{
+    var penalty = AdaptiveSwitchDecisionEngine.CalculatePenalty(0.02);
+    Assert(Math.Abs(penalty - 0.03) < 1e-12, "The context-miss penalty did not use the new multiplier.");
+}
+
+static void TestAdaptiveCompletionTime()
+{
+    var completion = AdaptiveSwitchDecisionEngine.CalculateCompletionTime(2, 20, 100);
+    Assert(Math.Abs(completion - 7) < 1e-12, "TTFT was not included in completion time.");
+    Assert(double.IsPositiveInfinity(AdaptiveSwitchDecisionEngine.CalculateCompletionTime(2, 0, 100)),
+        "A non-positive generation speed did not produce infinite completion time.");
+}
+
+static void TestAdaptiveNetSaving()
+{
+    var saving = AdaptiveSwitchDecisionEngine.CalculateNetSaving(0.02, 0.01, 313_920);
+    Assert(Math.Abs(saving - 0.079176) < 1e-12, "Net saving did not subtract the context penalty.");
+    Assert(double.IsNegativeInfinity(AdaptiveSwitchDecisionEngine.CalculateNetSaving(0.01, 0.01, 313_920)),
+        "A non-lower price did not produce negative infinite saving.");
+}
+
+static void TestAdaptiveCostAcceptsPositiveSaving()
+{
+    var result = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        0.02, 0.01, 1, 1, 20, 20,
+        TaskDurationCategory.Short, AdaptivePreference.Cost, 31));
+
+    Assert(result.ShouldSwitch && result.Reason == AdaptiveDecisionReason.AcceptedCost,
+        "Cost mode rejected a positive net saving within the completion cap.");
+    Assert(result.RemainingTokens == 78_480 && result.NetSavingUsd > 0,
+        "Cost mode did not use the optimistic Short token estimate.");
+}
+
+static void TestAdaptiveCostRejectsSlowCandidate()
+{
+    var exactBoundarySpeed = 78_480d / AdaptiveRoutingConstants.MaximumCostCompletionSeconds;
+    var result = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        0.02, 0.01, 0, 0, 20, exactBoundarySpeed,
+        TaskDurationCategory.Short, AdaptivePreference.Cost, 31));
+
+    Assert(!result.ShouldSwitch && result.Reason == AdaptiveDecisionReason.CostGuardRejected,
+        "Cost mode accepted a candidate at the strict 24-hour boundary.");
+}
+
+static void TestAdaptiveBalancedSafeguards()
+{
+    var accepted = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        0.05, 0.02, 1, 1, 20, 20,
+        TaskDurationCategory.Medium, AdaptivePreference.Balanced, 10));
+    var slow = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        0.05, 0.02, 1, 1, 20, 5,
+        TaskDurationCategory.Medium, AdaptivePreference.Balanced, 10));
+    var exactFivePercent = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        0.02, 0.019, 1, 1, 20, 20,
+        TaskDurationCategory.Medium, AdaptivePreference.Balanced, 10));
+
+    Assert(accepted.ShouldSwitch && accepted.Reason == AdaptiveDecisionReason.AcceptedBalanced,
+        "Balanced mode rejected a candidate satisfying every safeguard.");
+    Assert(!slow.ShouldSwitch && slow.Reason == AdaptiveDecisionReason.BalancedGuardRejected,
+        "Balanced mode accepted an excessive completion delay.");
+    Assert(!exactFivePercent.ShouldSwitch,
+        "Balanced mode accepted the strict five-percent price boundary.");
+}
+
+static void TestAdaptiveSpeedAcceptsGenerationBoost()
+{
+    var accepted = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        10, 11, 1, 1, 20, 24.01,
+        TaskDurationCategory.Medium, AdaptivePreference.Speed, 2));
+    var exactBoundary = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        10, 11, 1, 1, 20, 24,
+        TaskDurationCategory.Medium, AdaptivePreference.Speed, 2));
+
+    Assert(accepted.ShouldSwitch && accepted.Reason == AdaptiveDecisionReason.AcceptedSpeed,
+        "Speed mode rejected a generation boost above twenty percent at the price cap.");
+    Assert(!exactBoundary.ShouldSwitch,
+        "Speed mode accepted the strict 120-percent generation boundary.");
+}
+
+static void TestAdaptiveSpeedAcceptsEndToEndGain()
+{
+    var accepted = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        0.02, 0.02, 32, 1, 20, 20,
+        TaskDurationCategory.Medium, AdaptivePreference.Speed, 2));
+    var exactBoundary = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        0.02, 0.02, 31, 1, 20, 20,
+        TaskDurationCategory.Medium, AdaptivePreference.Speed, 2));
+
+    Assert(accepted.ShouldSwitch, "Speed mode rejected an end-to-end gain above thirty seconds.");
+    Assert(!exactBoundary.ShouldSwitch, "Speed mode accepted the strict thirty-second boundary.");
+}
+
+static void TestAdaptiveShortTaskProtection()
+{
+    var result = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        0.05, 0.01, 1, 1, 20, 40,
+        TaskDurationCategory.Short, AdaptivePreference.Balanced, 10));
+
+    Assert(!result.ShouldSwitch && result.Reason == AdaptiveDecisionReason.ShortTaskProtected,
+        "A short task switched outside Cost mode.");
+}
+
+static void TestAdaptiveInvalidPerformance()
+{
+    var result = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        0.05, 0.02, 1, double.NaN, 20, 20,
+        TaskDurationCategory.Medium, AdaptivePreference.Balanced, 10));
+
+    Assert(!result.ShouldSwitch && result.Reason == AdaptiveDecisionReason.BalancedGuardRejected,
+        "Invalid performance data accidentally satisfied the Balanced safeguards.");
+}
+
+static void TestAdaptiveInvalidOldPerformance()
+{
+    var balanced = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        0.05, 0.02, double.NaN, 1, 20, 5,
+        TaskDurationCategory.Medium, AdaptivePreference.Balanced, 10));
+    var speed = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+        0.02, 0.02, 1, 1, 0, 20,
+        TaskDurationCategory.Medium, AdaptivePreference.Speed, 2));
+
+    Assert(!balanced.ShouldSwitch && balanced.Reason == AdaptiveDecisionReason.BalancedGuardRejected,
+        "Invalid old performance satisfied the Balanced relative-time guard.");
+    Assert(!speed.ShouldSwitch && speed.Reason == AdaptiveDecisionReason.SpeedGuardRejected,
+        "Invalid old performance satisfied the Speed end-to-end guard.");
+}
+
 static void TestWarningProviderRemainsEligible()
 {
     var now = DateTimeOffset.UtcNow;
@@ -293,6 +523,7 @@ static void TestRoutingPreferenceDefaults()
 {
     var settings = new PersistentAppSettings();
     Assert(settings.RoutingMode == RoutingMode.Economy, "New installs must preserve lowest-price routing.");
+    Assert(settings.DurationCategory == TaskDurationCategory.Medium, "New installs must default to Medium duration.");
     Assert(settings.AccountCacheSeconds == 300, "Account cache default changed.");
     Assert(settings.Theme == WinFormsTheme.System, "Theme must follow Windows by default.");
 }
@@ -311,12 +542,14 @@ static void TestRoutingPreferenceRoundtrip()
         store.Save(new PersistentAppSettings
         {
             RoutingMode = RoutingMode.Speed,
+            DurationCategory = TaskDurationCategory.Long,
             AccountCacheSeconds = 90,
             Theme = WinFormsTheme.Dark
         }, null);
 
         var loaded = store.Load().Settings;
         Assert(loaded.RoutingMode == RoutingMode.Speed, "Routing mode did not roundtrip.");
+        Assert(loaded.DurationCategory == TaskDurationCategory.Long, "Duration category did not roundtrip.");
         Assert(loaded.AccountCacheSeconds == 90, "Cache duration did not roundtrip.");
         Assert(loaded.Theme == WinFormsTheme.Dark, "Theme did not roundtrip.");
     }
@@ -384,136 +617,200 @@ static void TestSelectivePolicyPreservesLocalWeights()
     Assert(Policy(RoutingMode.Balanced).PriceWeight == 0.80, "Balanced weight changed.");
     Assert(Policy(RoutingMode.Speed).PriceWeight == 0.35, "Speed weight changed.");
     Assert(new PersistentAppSettings().RoutingMode == RoutingMode.Economy, "Default mode changed.");
-    Assert(Policy(RoutingMode.Balanced).MinimumScoreAdvantageToSwitch == 0.05,
-        "Stability threshold changed.");
 }
 
-static void TestCloseFasterScoreKeepsCurrentGroup()
+static void TestCostModeProposesCheapest()
 {
     var now = DateTimeOffset.UtcNow;
-    var policy = Policy(RoutingMode.Balanced);
     var evaluation = RoutingEngine.Evaluate(
-        [Provider(1, 0.02, true, 0.99, now, 1_000), Provider(2, 0.02, true, 0.99, now, 980)],
-        [Group(1), Group(2)],
+        [
+            Provider(1, 0.01, true, 0.99, now, 2_000, outputTps: 20),
+            Provider(2, 0.011, true, 0.99, now, 100, outputTps: 100),
+            Provider(3, 0.05, true, 0.99, now, 500, outputTps: 20)
+        ],
+        [Group(1), Group(2), Group(3)],
         new Dictionary<long, double>(),
-        policy,
+        Policy(RoutingMode.Speed),
         now);
-    Assert(evaluation.Recommended?.Group.Id == 2, "Test setup did not recommend the slightly faster route.");
 
     var result = RouteDecisionEngine.Decide(
         evaluation,
-        new RouteState { CurrentGroupId = 1 },
-        policy,
+        new RouteState { CurrentGroupId = 3 },
+        Policy(RoutingMode.Speed),
+        new AdaptiveRoutingContext(RoutingMode.Economy, TaskDurationCategory.Short, 31),
         now,
-        observedCurrentGroupId: 1);
-    Assert(!result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 1,
-        "A tiny speed advantage replaced the current group.");
-    Assert(result.Decision.Reason == RouteDecisionReason.ScoreAdvantageTooSmall,
-        "A held speed decision did not expose its stability reason.");
+        observedCurrentGroupId: 3);
+    Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 1,
+        "Cost mode did not select the strict lowest-price baseline.");
 }
 
-static void TestCloseCheaperScoreKeepsCurrentGroup()
+static void TestCostModeKeepsStrictPriceOrderWithUnknownTtft()
 {
     var now = DateTimeOffset.UtcNow;
-    var policy = Policy(RoutingMode.Balanced);
     var evaluation = RoutingEngine.Evaluate(
-        [Provider(1, 0.0201, true, 0.99, now, 981), Provider(2, 0.02, true, 0.99, now, 1_000)],
-        [Group(1), Group(2)],
+        [
+            Provider(1, 0.01, true, 0.99, now, null, outputTps: 20),
+            Provider(2, 0.02, true, 0.99, now, 1_000, outputTps: 20),
+            Provider(3, 0.05, true, 0.99, now, 500, outputTps: 20)
+        ],
+        [Group(1), Group(2), Group(3)],
         new Dictionary<long, double>(),
-        policy,
+        Policy(RoutingMode.Economy),
         now);
-    Assert(evaluation.Recommended?.Group.Id == 2, "Test setup did not recommend the slightly cheaper route.");
+    Assert(evaluation.Baseline?.Group.Id == 2,
+        "Test setup did not reproduce the measured-only baseline behavior.");
 
     var result = RouteDecisionEngine.Decide(
         evaluation,
-        new RouteState { CurrentGroupId = 1 },
-        policy,
+        new RouteState { CurrentGroupId = 3 },
+        Policy(RoutingMode.Economy),
+        new AdaptiveRoutingContext(RoutingMode.Economy, TaskDurationCategory.Short, 31),
         now,
-        observedCurrentGroupId: 1);
-    Assert(!result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 1,
-        "A tiny price advantage replaced the current group.");
-    Assert(result.Decision.Reason == RouteDecisionReason.ScoreAdvantageTooSmall,
-        "A held price decision did not expose its stability reason.");
+        observedCurrentGroupId: 3);
+
+    Assert(!result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 3,
+        "Cost mode skipped the strict cheapest candidate and switched to a pricier measured group.");
+    Assert(result.Decision.Reason == RouteDecisionReason.AdaptiveCostRejected,
+        "Unknown cheapest TTFT did not fail the Cost completion guard.");
 }
 
-static void TestMeaningfulScoreAdvantageStillSwitches()
+static void TestFrequentCallsOverrideEconomy()
 {
     var now = DateTimeOffset.UtcNow;
-    var policy = Policy(RoutingMode.Balanced);
     var evaluation = RoutingEngine.Evaluate(
-        [Provider(1, 0.02, true, 0.99, now, 1_000), Provider(2, 0.02, true, 0.99, now, 400)],
+        [
+            Provider(1, 0.01, true, 0.99, now, 1_000, outputTps: 20),
+            Provider(2, 0.0105, true, 0.99, now, 100, outputTps: 30)
+        ],
         [Group(1), Group(2)],
         new Dictionary<long, double>(),
-        policy,
+        Policy(RoutingMode.Speed),
         now);
+
     var result = RouteDecisionEngine.Decide(
         evaluation,
         new RouteState { CurrentGroupId = 1 },
-        policy,
-        now,
-        observedCurrentGroupId: 1);
-    Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 2,
-        "A meaningful score advantage was blocked.");
-}
-
-static void TestUndefinedScoreDoesNotBlockSwitch()
-{
-    var now = DateTimeOffset.UtcNow;
-    var policy = Policy(RoutingMode.Economy);
-    var evaluation = RoutingEngine.Evaluate(
-        [Provider(1, 0.01, true, 0.99, now, 1_000), Provider(2, 0, true, 0.99, now, 2_000)],
-        [Group(1), Group(2)],
-        new Dictionary<long, double>(),
-        policy,
-        now);
-    var result = RouteDecisionEngine.Decide(
-        evaluation,
-        new RouteState { CurrentGroupId = 1 },
-        policy,
+        Policy(RoutingMode.Speed),
+        new AdaptiveRoutingContext(RoutingMode.Economy, TaskDurationCategory.Medium, 2),
         now,
         observedCurrentGroupId: 1);
     Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 2,
-        "An undefined weighted score blocked a zero-price route.");
+        "A frequent call interval did not allow the faster candidate.");
+    Assert(result.Decision.EffectivePreference == AdaptivePreference.Speed,
+        "Economy was not dynamically overridden with Speed.");
 }
 
-static void TestZeroPriceTieDoesNotInvokeStabilityHold()
+static void TestIdleCallsOverrideSpeed()
 {
     var now = DateTimeOffset.UtcNow;
-    var policy = Policy(RoutingMode.Economy);
     var evaluation = RoutingEngine.Evaluate(
-        [Provider(1, 0, true, 0.99, now, 1_000), Provider(2, 0, true, 0.99, now, 500)],
+        [
+            Provider(1, 0.01, true, 0.99, now, 1_000, outputTps: 20),
+            Provider(2, 0.05, true, 0.99, now, 100, outputTps: 100)
+        ],
         [Group(1), Group(2)],
         new Dictionary<long, double>(),
-        policy,
-        now);
-    var result = RouteDecisionEngine.Decide(
-        evaluation,
-        new RouteState { CurrentGroupId = 1 },
-        policy,
-        now,
-        observedCurrentGroupId: 1);
-    Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 2,
-        "Placeholder zero-price scores incorrectly triggered the stability hold.");
-}
-
-static void TestUnknownLatencyTieDoesNotInvokeStabilityHold()
-{
-    var now = DateTimeOffset.UtcNow;
-    var policy = Policy(RoutingMode.Balanced);
-    var evaluation = RoutingEngine.Evaluate(
-        [Provider(1, 0.02, true, 0.99, now, null), Provider(2, 0.02, true, 0.99, now, null)],
-        [Group(1), Group(2)],
-        new Dictionary<long, double>(),
-        policy,
+        Policy(RoutingMode.Economy),
         now);
     var result = RouteDecisionEngine.Decide(
         evaluation,
         new RouteState { CurrentGroupId = 2 },
-        policy,
+        Policy(RoutingMode.Economy),
+        new AdaptiveRoutingContext(RoutingMode.Speed, TaskDurationCategory.Short, 31),
         now,
         observedCurrentGroupId: 2);
     Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 1,
-        "Placeholder unknown-latency scores incorrectly triggered the stability hold.");
+        "An idle Speed preference did not switch to the cheaper candidate.");
+    Assert(result.Decision.EffectivePreference == AdaptivePreference.Cost,
+        "Idle time did not override Speed with Cost.");
+}
+
+static void TestAdaptiveRejectionKeepsCurrentGroup()
+{
+    var now = DateTimeOffset.UtcNow;
+    var evaluation = RoutingEngine.Evaluate(
+        [
+            Provider(1, 0.05, true, 0.99, now, 1_000, outputTps: 20),
+            Provider(2, 0.02, true, 0.99, now, 1_000, outputTps: 5)
+        ],
+        [Group(1), Group(2)],
+        new Dictionary<long, double>(),
+        Policy(RoutingMode.Balanced),
+        now);
+    var result = RouteDecisionEngine.Decide(
+        evaluation,
+        new RouteState { CurrentGroupId = 1 },
+        Policy(RoutingMode.Balanced),
+        new AdaptiveRoutingContext(RoutingMode.Balanced, TaskDurationCategory.Medium, 10),
+        now,
+        observedCurrentGroupId: 1);
+    Assert(!result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 1,
+        "A rejected adaptive candidate replaced the current group.");
+    Assert(result.Decision.Reason == RouteDecisionReason.AdaptiveBalancedRejected,
+        "The rejection did not expose its adaptive reason.");
+}
+
+static void TestAdaptiveAcceptanceUpdatesKeys()
+{
+    var now = DateTimeOffset.UtcNow;
+    var api = new StubRoutingClient(now)
+    {
+        ProvidersOverride =
+        [
+            Provider(1, 0.05, true, 1, now, 1_000, outputTps: 20, lastCallEndedAt: now.AddSeconds(-10)),
+            Provider(2, 0.02, true, 1, now, 1_000, outputTps: 20)
+        ],
+        GroupsOverride = [Group(1), Group(2)]
+    };
+    var settings = new PersistentAppSettings
+    {
+        RoutingMode = RoutingMode.Balanced,
+        DurationCategory = TaskDurationCategory.Medium,
+        KeySelectionInitialized = true,
+        SelectedKeyIds = [10]
+    };
+    using var service = new RoutingService(
+        settings,
+        new PersistentCredentials { BearerToken = "synthetic-access" },
+        new MemoryRouteStateStore(),
+        new StubRoutingClientFactory(api),
+        utcNow: () => now);
+
+    var result = service.RunOnceAsync().GetAwaiter().GetResult();
+    Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 2 && api.UpdateCalls == 1,
+        "An accepted adaptive decision did not update the selected Key.");
+    Assert(result.Decision.EffectivePreference == AdaptivePreference.Balanced &&
+        result.Decision.CurrentIntervalSeconds == 10,
+        "The service did not expose the interval-derived effective preference.");
+}
+
+static void TestAdaptiveRecoveryBypassesGuard()
+{
+    var now = DateTimeOffset.UtcNow;
+    var evaluation = RoutingEngine.Evaluate(
+        [Provider(2, 0.02, true, 0.99, now, 1_000, outputTps: 0)],
+        [Group(2)],
+        new Dictionary<long, double>(),
+        Policy(RoutingMode.Balanced),
+        now);
+    var initial = RouteDecisionEngine.Decide(
+        evaluation,
+        new RouteState(),
+        Policy(RoutingMode.Balanced),
+        new AdaptiveRoutingContext(RoutingMode.Balanced, TaskDurationCategory.Short, 10),
+        now);
+    var invalid = RouteDecisionEngine.Decide(
+        evaluation,
+        new RouteState { CurrentGroupId = 9 },
+        Policy(RoutingMode.Balanced),
+        new AdaptiveRoutingContext(RoutingMode.Balanced, TaskDurationCategory.Short, 10),
+        now,
+        observedCurrentGroupId: 9);
+
+    Assert(initial.Decision.ShouldSwitch && initial.Decision.Reason == RouteDecisionReason.InitialRoute,
+        "Initial routing was blocked by pairwise safeguards.");
+    Assert(invalid.Decision.ShouldSwitch && invalid.Decision.Reason == RouteDecisionReason.CurrentRouteInvalid,
+        "Invalid-route recovery was blocked by pairwise safeguards.");
 }
 
 static void TestMissingLatencyRanksLast()
@@ -589,19 +886,23 @@ static void TestWeightedSpeedWinnerSwitchesImmediately()
 {
     var now = DateTimeOffset.UtcNow;
     var evaluation = RoutingEngine.Evaluate(
-        [Provider(1, 0.02, true, 0.99, now, 10_000), Provider(2, 0.021, true, 0.99, now, 1_000)],
+        [
+            Provider(1, 0.02, true, 0.99, now, 10_000, outputTps: 20),
+            Provider(2, 0.021, true, 0.99, now, 1_000, outputTps: 30)
+        ],
         [Group(1), Group(2)],
         new Dictionary<long, double>(),
-        Policy(RoutingMode.Balanced),
+        Policy(RoutingMode.Speed),
         now);
     var result = RouteDecisionEngine.Decide(
         evaluation,
         new RouteState { CurrentGroupId = 1 },
-        Policy(RoutingMode.Balanced),
+        Policy(RoutingMode.Speed),
+        new AdaptiveRoutingContext(RoutingMode.Speed, TaskDurationCategory.Medium, 2),
         now,
         1);
-    Assert(result.Decision.ShouldSwitch && result.Decision.Reason == RouteDecisionReason.FasterForWeightedTradeoff,
-        "A clear weighted speed winner did not switch immediately.");
+    Assert(result.Decision.ShouldSwitch && result.Decision.Reason == RouteDecisionReason.AdaptiveSpeedAccepted,
+        "A candidate above the adaptive Speed threshold did not switch.");
 }
 
 static void TestAlreadyOptimalRouteDecision()
@@ -872,7 +1173,7 @@ static void TestAuditLogWritesValidJsonAndRotates()
         var entry = new RouteAuditEntry(
             DateTimeOffset.UtcNow,
             RoutingMode.Balanced,
-            RouteDecisionReason.FasterForWeightedTradeoff,
+            RouteDecisionReason.AdaptiveBalancedAccepted,
             1,
             2,
             false,
@@ -880,7 +1181,18 @@ static void TestAuditLogWritesValidJsonAndRotates()
                 new RouteAuditCandidate(2, 0.02, 250, 0.4, true),
                 new RouteAuditCandidate(3, double.NaN, double.PositiveInfinity, double.NegativeInfinity, false)
             ],
-            [new RouteAuditKey(10, true, true, null)]);
+            [new RouteAuditKey(10, true, true, null)])
+        {
+            EffectivePreference = AdaptivePreference.Balanced,
+            DurationCategory = TaskDurationCategory.Medium,
+            CurrentIntervalSeconds = 10,
+            AdaptiveReason = AdaptiveDecisionReason.AcceptedBalanced,
+            PenaltyUsd = 0.03,
+            NetSavingUsd = 0.04,
+            OldCompletionSeconds = 4_000,
+            NewCompletionSeconds = 3_900,
+            DeltaSeconds = -100
+        };
         writer.Write(entry);
         writer.Write(entry);
 
@@ -892,6 +1204,20 @@ static void TestAuditLogWritesValidJsonAndRotates()
             {
                 using var document = JsonDocument.Parse(line);
                 Assert(document.RootElement.TryGetProperty("timestamp", out _), "Audit JSON omitted timestamp.");
+                Assert(document.RootElement.TryGetProperty("effectivePreference", out _),
+                    "Audit JSON omitted the effective preference.");
+                Assert(document.RootElement.TryGetProperty("durationCategory", out _),
+                    "Audit JSON omitted the duration category.");
+                Assert(document.RootElement.TryGetProperty("currentIntervalSeconds", out _),
+                    "Audit JSON omitted the current interval.");
+                Assert(document.RootElement.TryGetProperty("adaptiveReason", out _),
+                    "Audit JSON omitted the adaptive reason.");
+                Assert(document.RootElement.TryGetProperty("penaltyUsd", out _) &&
+                    document.RootElement.TryGetProperty("netSavingUsd", out _) &&
+                    document.RootElement.TryGetProperty("oldCompletionSeconds", out _) &&
+                    document.RootElement.TryGetProperty("newCompletionSeconds", out _) &&
+                    document.RootElement.TryGetProperty("deltaSeconds", out _),
+                    "Audit JSON omitted adaptive numeric metrics.");
                 Assert(!line.Contains("password", StringComparison.OrdinalIgnoreCase) &&
                     !line.Contains("refresh", StringComparison.OrdinalIgnoreCase) &&
                     !line.Contains("token", StringComparison.OrdinalIgnoreCase) &&
@@ -1245,6 +1571,7 @@ static void TestAuthenticationErrorHidesServerMessage()
     catch (AIHubApiException exception)
     {
         Assert(exception.ApiCode == "invalid_grant", "Authentication error discarded the safe API code.");
+        Assert(exception.IsAuthenticationRequest, "Authentication endpoint context was discarded.");
         Assert(!exception.Message.Contains(sensitiveMessage, StringComparison.Ordinal), "Authentication error exposed the server message.");
     }
 }
@@ -1266,6 +1593,104 @@ static void TestBusinessErrorHidesServerMessage()
         Assert(exception.ApiCode == "500", "Business error discarded the API code.");
         Assert(!exception.Message.Contains(sensitiveMessage, StringComparison.Ordinal), "Business error exposed the server message.");
     }
+}
+
+static void TestAuthenticationStatusesHaveSafeDiagnostics()
+{
+    const string sensitiveText =
+        "email=private@example.test password=secret Token=token-value Cookie=session-value User-Agent=private-agent raw-server-text";
+    var cases = new (HttpStatusCode StatusCode, string ExpectedFragment)[]
+    {
+        (HttpStatusCode.Unauthorized, "邮箱或密码不正确"),
+        (HttpStatusCode.Forbidden, "平台策略拒绝"),
+        (HttpStatusCode.TooManyRequests, "1 分钟"),
+        (HttpStatusCode.ServiceUnavailable, "暂时不可用")
+    };
+    var messages = new List<string>();
+
+    foreach (var item in cases)
+    {
+        var exception = new AIHubApiException(
+            sensitiveText,
+            item.StatusCode,
+            sensitiveText,
+            isAuthenticationRequest: true);
+        var message = SafeErrorPresentation.GetMessage(exception);
+        messages.Add(message);
+
+        Assert(message.Contains(item.ExpectedFragment, StringComparison.Ordinal),
+            $"HTTP {(int)item.StatusCode} did not receive actionable authentication guidance.");
+        Assert(!message.Contains(sensitiveText, StringComparison.Ordinal),
+            $"HTTP {(int)item.StatusCode} exposed the raw authentication error.");
+    }
+
+    Assert(messages.Distinct(StringComparer.Ordinal).Count() == cases.Length,
+        "Authentication status diagnostics were collapsed into the same message.");
+}
+
+static void TestBusinessAuthenticationStatusesKeepBusinessDiagnostics()
+{
+    const string sensitiveText = "email=private@example.test password=secret token-value";
+
+    var unauthorized = SafeErrorPresentation.GetMessage(new AIHubApiException(
+        sensitiveText,
+        HttpStatusCode.Unauthorized,
+        "401"));
+    Assert(unauthorized.Contains("Token/session 已失效", StringComparison.Ordinal),
+        "Business 401 did not explain that the saved session is invalid.");
+    Assert(!unauthorized.Contains("邮箱或密码不正确", StringComparison.Ordinal),
+        "Business 401 was incorrectly presented as a password failure.");
+
+    var forbidden = SafeErrorPresentation.GetMessage(new AIHubApiException(
+        sensitiveText,
+        HttpStatusCode.Forbidden,
+        "403"));
+    Assert(forbidden == "当前账号没有执行该操作的权限。",
+        "Business 403 did not preserve the permission diagnostic.");
+}
+
+static void TestMalformedAuthenticationResponsesRetainEndpointContext()
+{
+    var responseBodies = new[]
+    {
+        string.Empty,
+        "{",
+        "{\"code\":0,\"message\":\"ok\"}",
+        "{\"code\":0,\"message\":\"ok\",\"data\":null}",
+        "{\"code\":0,\"message\":\"ok\",\"data\":[]}"
+    };
+
+    foreach (var responseBody in responseBodies)
+    {
+        var handler = new StubHttpMessageHandler(_ => JsonResponse(responseBody));
+        using var client = new AIHubClient("https://example.test", messageHandler: handler);
+
+        try
+        {
+            client.LoginAsync(
+                new LoginCredentials("user@example.test", "synthetic-password"),
+                CancellationToken.None).GetAwaiter().GetResult();
+            throw new InvalidOperationException("Malformed authentication response was accepted.");
+        }
+        catch (AIHubApiException exception)
+        {
+            Assert(exception.IsAuthenticationRequest,
+                "Malformed authentication response lost the endpoint context.");
+            Assert(SafeErrorPresentation.GetMessage(exception).StartsWith("认证", StringComparison.Ordinal),
+                "Malformed authentication response did not use authentication guidance.");
+        }
+    }
+}
+
+static void TestUnknownErrorsDoNotExposeCredentialText()
+{
+    const string sensitiveText =
+        "email=private@example.test password=secret Token=token-value Cookie=session-value User-Agent=private-agent";
+
+    var message = SafeErrorPresentation.GetMessage(new Exception(sensitiveText));
+
+    Assert(message == "操作失败，请重试。", "Unknown errors did not use the fixed safe fallback.");
+    Assert(!message.Contains(sensitiveText, StringComparison.Ordinal), "Unknown error exposed credential text.");
 }
 
 static void TestInteractiveLoginRequirementIsRejected()
@@ -1365,7 +1790,9 @@ static ProviderStatus Provider(
     double success,
     DateTimeOffset checkedAt,
     double? latency = 1000,
-    bool warning = false)
+    bool warning = false,
+    double? outputTps = 20,
+    DateTimeOffset? lastCallEndedAt = null)
 {
     return new ProviderStatus
     {
@@ -1377,7 +1804,9 @@ static ProviderStatus Provider(
         Available = available,
         Enabled = true,
         CheckedAt = checkedAt,
+        LastCallEndedAt = lastCallEndedAt,
         FirstTokenLatencyMs = latency,
+        OutputTokensPerSecond = outputTps,
         SuccessRates = new Dictionary<string, double> { ["6h"] = success },
         WarningReasons = warning
             ? [new ProviderWarningReason { Type = "synthetic_warning", Message = "synthetic warning" }]
@@ -1453,6 +1882,8 @@ sealed class StubRoutingClient(DateTimeOffset now) : IAIHubApiClient
     public bool MixedGroups { get; init; }
     public int FailUpdateCount { get; init; }
     public double? UserRateOverride { get; init; }
+    public IReadOnlyList<ProviderStatus>? ProvidersOverride { get; init; }
+    public IReadOnlyList<GroupInfo>? GroupsOverride { get; init; }
 
     public Task<MonitorSummary> GetProviderSummaryAsync(CancellationToken cancellationToken = default)
     {
@@ -1462,7 +1893,7 @@ sealed class StubRoutingClient(DateTimeOffset now) : IAIHubApiClient
             throw new AIHubApiException("Authentication required.", HttpStatusCode.Unauthorized, "401");
         return Task.FromResult(new MonitorSummary
         {
-            Apis = [ProviderForStub(2, now)]
+            Apis = ProvidersOverride?.ToList() ?? [ProviderForStub(2, now)]
         });
     }
 
@@ -1484,7 +1915,7 @@ sealed class StubRoutingClient(DateTimeOffset now) : IAIHubApiClient
     public Task<IReadOnlyList<GroupInfo>> GetAvailableGroupsAsync(CancellationToken cancellationToken = default)
     {
         GroupsCalls++;
-        return Task.FromResult<IReadOnlyList<GroupInfo>>([GroupForStub(2)]);
+        return Task.FromResult(GroupsOverride ?? [GroupForStub(2)]);
     }
 
     public Task<IReadOnlyDictionary<long, double>> GetUserGroupRatesAsync(CancellationToken cancellationToken = default)
@@ -1546,6 +1977,7 @@ sealed class StubRoutingClient(DateTimeOffset now) : IAIHubApiClient
         Enabled = true,
         CheckedAt = checkedAt,
         FirstTokenLatencyMs = 500,
+        OutputTokensPerSecond = 20,
         SuccessRates = new Dictionary<string, double> { ["6h"] = 1 }
     };
 

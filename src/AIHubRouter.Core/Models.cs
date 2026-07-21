@@ -40,6 +40,12 @@ public sealed class ProviderStatus
     [JsonPropertyName("checkedAt")]
     public DateTimeOffset? CheckedAt { get; init; }
 
+    [JsonPropertyName("lastCallEndedAt")]
+    public DateTimeOffset? LastCallEndedAt { get; init; }
+
+    [JsonPropertyName("lastCallAt")]
+    public DateTimeOffset? LastCallAt { get; init; }
+
     [JsonPropertyName("firstTokenLatencyMs")]
     public double? FirstTokenLatencyMs { get; init; }
 
@@ -58,6 +64,8 @@ public sealed class ProviderStatus
     public double? SuccessRate6h => SuccessRates.TryGetValue("6h", out var value) ? value : null;
 
     public bool HasWarnings => WarningReasons is { Count: > 0 };
+
+    public DateTimeOffset? ResolvedLastCallEndedAt => LastCallEndedAt ?? LastCallAt;
 }
 
 public sealed class ProviderWarningReason
@@ -147,6 +155,25 @@ public enum RoutingMode
     Speed
 }
 
+public enum TaskDurationCategory
+{
+    Short,
+    Medium,
+    Long
+}
+
+public enum AdaptivePreference
+{
+    Cost,
+    Balanced,
+    Speed
+}
+
+public sealed record DurationConfiguration(
+    double MinimumRemainingTokens,
+    double MaximumRemainingTokens,
+    double ExpectedCompletionSeconds);
+
 public enum WinFormsTheme
 {
     System,
@@ -156,13 +183,10 @@ public enum WinFormsTheme
 
 public sealed record BalancedRoutingPolicy
 {
-    public const double DefaultMinimumScoreAdvantageToSwitch = 0.05;
-
     public string Platform { get; init; } = "openai";
     public RoutingMode Mode { get; init; } = RoutingMode.Economy;
     public double MinimumSuccessRate6h { get; init; } = 0;
     public TimeSpan MaximumStatusAge { get; init; } = TimeSpan.FromMinutes(15);
-    public double? MinimumScoreAdvantageOverride { get; init; }
 
     public double PriceWeight => Mode switch
     {
@@ -173,9 +197,6 @@ public sealed record BalancedRoutingPolicy
     };
 
     public double LatencyWeight => 1 - PriceWeight;
-
-    public double MinimumScoreAdvantageToSwitch =>
-        MinimumScoreAdvantageOverride ?? DefaultMinimumScoreAdvantageToSwitch;
 
     public void Validate()
     {
@@ -199,11 +220,6 @@ public sealed record BalancedRoutingPolicy
             throw new ArgumentOutOfRangeException(nameof(Mode));
         }
 
-        if (MinimumScoreAdvantageOverride is { } advantage &&
-            (advantage < 0 || !double.IsFinite(advantage)))
-        {
-            throw new ArgumentOutOfRangeException(nameof(MinimumScoreAdvantageOverride));
-        }
     }
 }
 
@@ -224,7 +240,17 @@ public enum RouteDecisionReason
     AlreadyOptimal,
     ScoreAdvantageTooSmall,
     BetterPrice,
-    FasterForWeightedTradeoff
+    FasterForWeightedTradeoff,
+    AdaptiveCostAccepted,
+    AdaptiveBalancedAccepted,
+    AdaptiveSpeedAccepted,
+    AdaptivePriceNotLower,
+    AdaptiveShortTaskProtected,
+    AdaptiveRemainingWorkTooSmall,
+    AdaptiveCostRejected,
+    AdaptiveBalancedRejected,
+    AdaptiveSpeedRejected,
+    AdaptiveUnknownPreference
 }
 
 public sealed record RouteDecision(
@@ -234,7 +260,19 @@ public sealed record RouteDecision(
     RouteDecisionReason Reason,
     double PricePremiumPercent,
     double? LatencyImprovementPercent,
-    DateTimeOffset EvaluatedAt);
+    DateTimeOffset EvaluatedAt)
+{
+    public AdaptivePreference? EffectivePreference { get; init; }
+    public TaskDurationCategory? DurationCategory { get; init; }
+    public double? CurrentIntervalSeconds { get; init; }
+    public AdaptiveSwitchDecision? AdaptiveDecision { get; init; }
+    public string Detail { get; init; } = string.Empty;
+}
+
+public sealed record AdaptiveRoutingContext(
+    RoutingMode BaseMode,
+    TaskDurationCategory DurationCategory,
+    double? CurrentIntervalSeconds);
 
 public sealed record RouteState
 {

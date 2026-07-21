@@ -123,17 +123,36 @@ public sealed class RoutingService : IDisposable
         }
 
         var observedGroupId = ResolveObservedGroup(selectedKeys);
-        var policy = _settings.CreatePolicy();
+        var state = _stateStore.Load();
+        var currentGroupId = observedGroupId ?? state.CurrentGroupId;
+        var basePolicy = _settings.CreatePolicy();
+        var currentInterval = AdaptiveSwitchDecisionEngine.ResolveCurrentIntervalSeconds(
+            summary.Apis,
+            currentGroupId,
+            basePolicy.Platform,
+            now);
+        var basePreference = AdaptiveSwitchDecisionEngine.ToPreference(basePolicy.Mode);
+        var effectivePreference = AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(
+            currentInterval,
+            basePreference);
+        var effectivePolicy = basePolicy with
+        {
+            Mode = AdaptiveSwitchDecisionEngine.ToRoutingMode(effectivePreference)
+        };
         var evaluation = RoutingEngine.Evaluate(
             summary.Apis,
             _cachedGroups,
             _cachedRates,
-            policy,
+            effectivePolicy,
             now);
         var decisionResult = RouteDecisionEngine.Decide(
             evaluation,
-            _stateStore.Load(),
-            policy,
+            state,
+            effectivePolicy,
+            new AdaptiveRoutingContext(
+                basePolicy.Mode,
+                _settings.DurationCategory,
+                currentInterval),
             now,
             observedGroupId);
         var keyResults = new List<KeyRouteResult>();
@@ -168,7 +187,12 @@ public sealed class RoutingService : IDisposable
                         throw;
                     }
 
-                    keyResults.Add(new KeyRouteResult(key.Id, key.Name, true, false, GetSafeErrorMessage(exception)));
+                    keyResults.Add(new KeyRouteResult(
+                        key.Id,
+                        key.Name,
+                        true,
+                        false,
+                        SafeErrorPresentation.GetMessage(exception)));
                 }
             }
         }
@@ -297,14 +321,6 @@ public sealed class RoutingService : IDisposable
         _authenticatedClient = null;
         _authenticatedClientToken = null;
     }
-
-    private static string GetSafeErrorMessage(Exception exception) => exception switch
-    {
-        AIHubApiException apiException => apiException.Message,
-        HttpRequestException => "Network connection failed.",
-        TaskCanceledException => "Request timed out.",
-        _ => "Route request failed."
-    };
 
     public void Dispose()
     {
