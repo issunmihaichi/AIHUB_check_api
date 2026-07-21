@@ -15,15 +15,15 @@
 **Files:**
 - Modify: `tests/AIHubRouter.Core.Tests/Program.cs`
 
-- [ ] **Step 1: Register focused tests**
+- [x] **Step 1: Register focused tests**
 
 Add test cases for HTTP 401, 403, 429, and 503 authentication failures plus an unknown exception containing synthetic credentials.
 
-- [ ] **Step 2: Assert fixed safe messages**
+- [x] **Step 2: Assert fixed safe messages**
 
 Use `SafeErrorPresentation.GetMessage(exception)` and assert that each HTTP status produces distinct guidance. Combine the returned messages and assert that synthetic email, password, Token, Cookie, User-Agent, and raw server text are absent.
 
-- [ ] **Step 3: Run the tests and verify RED**
+- [x] **Step 3: Run the tests and verify RED**
 
 Run:
 
@@ -38,7 +38,7 @@ Expected: build failure because `SafeErrorPresentation` does not exist.
 **Files:**
 - Create: `src/AIHubRouter.Core/SafeErrorPresentation.cs`
 
-- [ ] **Step 1: Implement the minimal status mapping**
+- [x] **Step 1: Implement the minimal status mapping**
 
 Add `public static string GetMessage(Exception exception)` with fixed mappings:
 
@@ -51,7 +51,7 @@ AIHubApiException { StatusCode: HttpStatusCode.ServiceUnavailable } => "平台�
 
 Also preserve fixed messages for interactive authentication, network failure, timeout, and local validation. Unknown exceptions must return a generic fixed message rather than `exception.Message`.
 
-- [ ] **Step 2: Run the tests and verify GREEN**
+- [x] **Step 2: Run the tests and verify GREEN**
 
 Run the Core test project and expect all tests to pass.
 
@@ -61,15 +61,15 @@ Run the Core test project and expect all tests to pass.
 - Modify: `src/AIHubRouter.WinForms/MainForm.cs`
 - Modify: `src/AIHubRouter.Core/RoutingService.cs`
 
-- [ ] **Step 1: Replace WinForms local mapping**
+- [x] **Step 1: Replace WinForms local mapping**
 
 Replace calls to `GetSafeErrorMessage(exception)` with `SafeErrorPresentation.GetMessage(exception)` and remove the local method.
 
-- [ ] **Step 2: Replace routing-service local mapping**
+- [x] **Step 2: Replace routing-service local mapping**
 
 Replace its local helper with the same Core method so foreground and unattended routing report the same safe diagnosis.
 
-- [ ] **Step 3: Run tests and build**
+- [x] **Step 3: Run tests and build**
 
 Run:
 
@@ -85,14 +85,14 @@ Expected: all tests pass and build completes with zero warnings and zero errors.
 **Files:**
 - Modify only if required by existing scripts: none expected
 
-- [ ] **Step 1: Run existing publish/security gates**
+- [x] **Step 1: Run existing publish/security gates**
 
 Run the repository's documented Win32 publish and secret-scan commands. Confirm no local settings, credentials, identity strings, or raw authentication responses enter artifacts.
 
-- [ ] **Step 2: Review the diff**
+- [x] **Step 2: Review the diff**
 
 Confirm the change does not alter login request fields, retry counts, session persistence, routing decisions, or Win32-only packaging.
 
-- [ ] **Step 3: Commit and push**
+- [x] **Step 3: Commit and push**
 
 Commit the focused fix and push `codex/sync-onrightpath-v1.0.3` so PR #3 receives the update.
