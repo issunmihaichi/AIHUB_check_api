@@ -75,7 +75,7 @@ Run:
 
 ```powershell
 dotnet run --project tests/AIHubRouter.Core.Tests/AIHubRouter.Core.Tests.csproj -c Release
-dotnet build AIHubRouter.slnx -c Release
+dotnet build AIHubRouter.sln -c Release
 ```
 
 Expected: all tests pass and build completes with zero warnings and zero errors.

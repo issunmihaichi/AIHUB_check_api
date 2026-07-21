@@ -563,7 +563,7 @@ internal sealed partial class MainForm : Form
                     throw;
                 }
 
-                failed.Add($"{key.Name}: {GetSafeErrorMessage(exception)}");
+                failed.Add($"{key.Name}: {SafeErrorPresentation.GetMessage(exception)}");
             }
         }
 
@@ -1107,26 +1107,13 @@ internal sealed partial class MainForm : Form
             return;
         }
 
-        var message = GetSafeErrorMessage(exception);
+        var message = SafeErrorPresentation.GetMessage(exception);
         if (_autoRouteCheck.Checked && exception is AIHubApiException { IsAuthenticationFailure: true })
         {
             _autoRouteCheck.Checked = false;
         }
 
         SetStatus(message, success: false);
-    }
-
-    private static string GetSafeErrorMessage(Exception exception)
-    {
-        return exception switch
-        {
-            AIHubApiException apiException => apiException.Message,
-            HttpRequestException => "网络连接失败，请检查站点地址和网络。",
-            TaskCanceledException => "请求超时，请稍后重试。",
-            ArgumentException argumentException => argumentException.Message,
-            InvalidOperationException invalidOperationException => invalidOperationException.Message,
-            _ => $"操作失败：{exception.Message}"
-        };
     }
 
     private static string? FindIdentity(JsonElement element)

@@ -288,7 +288,7 @@ public sealed class AIHubClient : IAIHubApiClient
             }
         }
 
-        return new AIHubApiException(message, statusCode, apiCode);
+        return new AIHubApiException(message, statusCode, apiCode, isAuthenticationEndpoint);
     }
 
     private static string ReadCode(JsonElement codeElement)
@@ -321,7 +321,9 @@ public sealed class AIHubClient : IAIHubApiClient
 
         if (string.IsNullOrWhiteSpace(response.AccessToken))
         {
-            throw new AIHubApiException("认证响应缺少 access token。");
+            throw new AIHubApiException(
+                "认证响应缺少 access token。",
+                isAuthenticationRequest: true);
         }
 
         return new AuthSession(

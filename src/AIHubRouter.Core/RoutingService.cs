@@ -187,7 +187,12 @@ public sealed class RoutingService : IDisposable
                         throw;
                     }
 
-                    keyResults.Add(new KeyRouteResult(key.Id, key.Name, true, false, GetSafeErrorMessage(exception)));
+                    keyResults.Add(new KeyRouteResult(
+                        key.Id,
+                        key.Name,
+                        true,
+                        false,
+                        SafeErrorPresentation.GetMessage(exception)));
                 }
             }
         }
@@ -316,14 +321,6 @@ public sealed class RoutingService : IDisposable
         _authenticatedClient = null;
         _authenticatedClientToken = null;
     }
-
-    private static string GetSafeErrorMessage(Exception exception) => exception switch
-    {
-        AIHubApiException apiException => apiException.Message,
-        HttpRequestException => "Network connection failed.",
-        TaskCanceledException => "Request timed out.",
-        _ => "Route request failed."
-    };
 
     public void Dispose()
     {

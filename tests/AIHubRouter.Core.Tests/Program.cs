@@ -85,6 +85,8 @@ var tests = new (string Name, Action Body)[]
     ("Refresh keeps token when server omits rotation", TestRefreshKeepsTokenWhenServerOmitsRotation),
     ("Authentication error hides server message", TestAuthenticationErrorHidesServerMessage),
     ("Business error hides server message", TestBusinessErrorHidesServerMessage),
+    ("Authentication statuses have safe diagnostics", TestAuthenticationStatusesHaveSafeDiagnostics),
+    ("Unknown errors do not expose credential text", TestUnknownErrorsDoNotExposeCredentialText),
     ("Interactive login requirement is rejected", TestInteractiveLoginRequirementIsRejected),
     ("Empty key selection roundtrips", TestEmptyKeySelectionRoundtrips),
     ("First key selection chooses first active key", TestFirstKeySelectionChoosesFirstActiveKey),
@@ -1567,6 +1569,7 @@ static void TestAuthenticationErrorHidesServerMessage()
     catch (AIHubApiException exception)
     {
         Assert(exception.ApiCode == "invalid_grant", "Authentication error discarded the safe API code.");
+        Assert(exception.IsAuthenticationRequest, "Authentication endpoint context was discarded.");
         Assert(!exception.Message.Contains(sensitiveMessage, StringComparison.Ordinal), "Authentication error exposed the server message.");
     }
 }
@@ -1588,6 +1591,50 @@ static void TestBusinessErrorHidesServerMessage()
         Assert(exception.ApiCode == "500", "Business error discarded the API code.");
         Assert(!exception.Message.Contains(sensitiveMessage, StringComparison.Ordinal), "Business error exposed the server message.");
     }
+}
+
+static void TestAuthenticationStatusesHaveSafeDiagnostics()
+{
+    const string sensitiveText =
+        "email=private@example.test password=secret Token=token-value Cookie=session-value User-Agent=private-agent raw-server-text";
+    var cases = new (HttpStatusCode StatusCode, string ExpectedFragment)[]
+    {
+        (HttpStatusCode.Unauthorized, "邮箱或密码不正确"),
+        (HttpStatusCode.Forbidden, "平台策略拒绝"),
+        (HttpStatusCode.TooManyRequests, "1 分钟"),
+        (HttpStatusCode.ServiceUnavailable, "暂时不可用")
+    };
+    var messages = new List<string>();
+
+    foreach (var item in cases)
+    {
+        var exception = new AIHubApiException(
+            sensitiveText,
+            item.StatusCode,
+            sensitiveText,
+            isAuthenticationRequest: true);
+        var message = SafeErrorPresentation.GetMessage(exception);
+        messages.Add(message);
+
+        Assert(message.Contains(item.ExpectedFragment, StringComparison.Ordinal),
+            $"HTTP {(int)item.StatusCode} did not receive actionable authentication guidance.");
+        Assert(!message.Contains(sensitiveText, StringComparison.Ordinal),
+            $"HTTP {(int)item.StatusCode} exposed the raw authentication error.");
+    }
+
+    Assert(messages.Distinct(StringComparer.Ordinal).Count() == cases.Length,
+        "Authentication status diagnostics were collapsed into the same message.");
+}
+
+static void TestUnknownErrorsDoNotExposeCredentialText()
+{
+    const string sensitiveText =
+        "email=private@example.test password=secret Token=token-value Cookie=session-value User-Agent=private-agent";
+
+    var message = SafeErrorPresentation.GetMessage(new Exception(sensitiveText));
+
+    Assert(message == "操作失败，请重试。", "Unknown errors did not use the fixed safe fallback.");
+    Assert(!message.Contains(sensitiveText, StringComparison.Ordinal), "Unknown error exposed credential text.");
 }
 
 static void TestInteractiveLoginRequirementIsRejected()
