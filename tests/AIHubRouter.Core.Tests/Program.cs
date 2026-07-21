@@ -41,18 +41,18 @@ var tests = new (string Name, Action Body)[]
     ("Economy mode protects price", TestEconomyModeProtectsPrice),
     ("Speed mode accepts larger price premium", TestSpeedModeAcceptsLargerPremium),
     ("Selective policy preserves local routing weights", TestSelectivePolicyPreservesLocalWeights),
-    ("Close faster score keeps current group", TestCloseFasterScoreKeepsCurrentGroup),
-    ("Close cheaper score keeps current group", TestCloseCheaperScoreKeepsCurrentGroup),
-    ("Meaningful score advantage still switches", TestMeaningfulScoreAdvantageStillSwitches),
-    ("Undefined score does not block a switch", TestUndefinedScoreDoesNotBlockSwitch),
-    ("Zero-price tie does not invoke stability hold", TestZeroPriceTieDoesNotInvokeStabilityHold),
-    ("Unknown-latency tie does not invoke stability hold", TestUnknownLatencyTieDoesNotInvokeStabilityHold),
+    ("Cost mode proposes strict cheapest candidate", TestCostModeProposesCheapest),
+    ("Frequent calls override economy with speed", TestFrequentCallsOverrideEconomy),
+    ("Idle calls override speed with cost", TestIdleCallsOverrideSpeed),
+    ("Adaptive rejection keeps current group", TestAdaptiveRejectionKeepsCurrentGroup),
+    ("Adaptive acceptance updates selected Keys", TestAdaptiveAcceptanceUpdatesKeys),
+    ("Initial and invalid routes recover immediately", TestAdaptiveRecoveryBypassesGuard),
     ("Missing latency ranks last", TestMissingLatencyRanksLast),
     ("Invalid measurements are excluded", TestInvalidMeasurementsAreExcluded),
     ("Extreme latency scores stay finite", TestExtremeLatencyScoresStayFinite),
     ("Zero multiplier remains free", TestZeroMultiplierWindow),
     ("Initial route has an explainable reason", TestInitialRouteDecision),
-    ("Weighted speed winner switches immediately", TestWeightedSpeedWinnerSwitchesImmediately),
+    ("Adaptive speed winner switches after guard", TestWeightedSpeedWinnerSwitchesImmediately),
     ("Already optimal route does not switch", TestAlreadyOptimalRouteDecision),
     ("Invalid current route switches", TestInvalidCurrentRouteDecision),
     ("No candidate keeps route state", TestNoCandidateDecision),
@@ -593,136 +593,170 @@ static void TestSelectivePolicyPreservesLocalWeights()
     Assert(Policy(RoutingMode.Balanced).PriceWeight == 0.80, "Balanced weight changed.");
     Assert(Policy(RoutingMode.Speed).PriceWeight == 0.35, "Speed weight changed.");
     Assert(new PersistentAppSettings().RoutingMode == RoutingMode.Economy, "Default mode changed.");
-    Assert(Policy(RoutingMode.Balanced).MinimumScoreAdvantageToSwitch == 0.05,
-        "Stability threshold changed.");
 }
 
-static void TestCloseFasterScoreKeepsCurrentGroup()
+static void TestCostModeProposesCheapest()
 {
     var now = DateTimeOffset.UtcNow;
-    var policy = Policy(RoutingMode.Balanced);
     var evaluation = RoutingEngine.Evaluate(
-        [Provider(1, 0.02, true, 0.99, now, 1_000), Provider(2, 0.02, true, 0.99, now, 980)],
-        [Group(1), Group(2)],
+        [
+            Provider(1, 0.01, true, 0.99, now, 2_000, outputTps: 20),
+            Provider(2, 0.011, true, 0.99, now, 100, outputTps: 100),
+            Provider(3, 0.05, true, 0.99, now, 500, outputTps: 20)
+        ],
+        [Group(1), Group(2), Group(3)],
         new Dictionary<long, double>(),
-        policy,
+        Policy(RoutingMode.Speed),
         now);
-    Assert(evaluation.Recommended?.Group.Id == 2, "Test setup did not recommend the slightly faster route.");
 
     var result = RouteDecisionEngine.Decide(
         evaluation,
-        new RouteState { CurrentGroupId = 1 },
-        policy,
+        new RouteState { CurrentGroupId = 3 },
+        Policy(RoutingMode.Speed),
+        new AdaptiveRoutingContext(RoutingMode.Economy, TaskDurationCategory.Short, 31),
         now,
-        observedCurrentGroupId: 1);
-    Assert(!result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 1,
-        "A tiny speed advantage replaced the current group.");
-    Assert(result.Decision.Reason == RouteDecisionReason.ScoreAdvantageTooSmall,
-        "A held speed decision did not expose its stability reason.");
+        observedCurrentGroupId: 3);
+    Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 1,
+        "Cost mode did not select the strict lowest-price baseline.");
 }
 
-static void TestCloseCheaperScoreKeepsCurrentGroup()
+static void TestFrequentCallsOverrideEconomy()
 {
     var now = DateTimeOffset.UtcNow;
-    var policy = Policy(RoutingMode.Balanced);
     var evaluation = RoutingEngine.Evaluate(
-        [Provider(1, 0.0201, true, 0.99, now, 981), Provider(2, 0.02, true, 0.99, now, 1_000)],
+        [
+            Provider(1, 0.01, true, 0.99, now, 1_000, outputTps: 20),
+            Provider(2, 0.0105, true, 0.99, now, 100, outputTps: 30)
+        ],
         [Group(1), Group(2)],
         new Dictionary<long, double>(),
-        policy,
+        Policy(RoutingMode.Speed),
         now);
-    Assert(evaluation.Recommended?.Group.Id == 2, "Test setup did not recommend the slightly cheaper route.");
 
     var result = RouteDecisionEngine.Decide(
         evaluation,
         new RouteState { CurrentGroupId = 1 },
-        policy,
-        now,
-        observedCurrentGroupId: 1);
-    Assert(!result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 1,
-        "A tiny price advantage replaced the current group.");
-    Assert(result.Decision.Reason == RouteDecisionReason.ScoreAdvantageTooSmall,
-        "A held price decision did not expose its stability reason.");
-}
-
-static void TestMeaningfulScoreAdvantageStillSwitches()
-{
-    var now = DateTimeOffset.UtcNow;
-    var policy = Policy(RoutingMode.Balanced);
-    var evaluation = RoutingEngine.Evaluate(
-        [Provider(1, 0.02, true, 0.99, now, 1_000), Provider(2, 0.02, true, 0.99, now, 400)],
-        [Group(1), Group(2)],
-        new Dictionary<long, double>(),
-        policy,
-        now);
-    var result = RouteDecisionEngine.Decide(
-        evaluation,
-        new RouteState { CurrentGroupId = 1 },
-        policy,
+        Policy(RoutingMode.Speed),
+        new AdaptiveRoutingContext(RoutingMode.Economy, TaskDurationCategory.Medium, 2),
         now,
         observedCurrentGroupId: 1);
     Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 2,
-        "A meaningful score advantage was blocked.");
+        "A frequent call interval did not allow the faster candidate.");
+    Assert(result.Decision.EffectivePreference == AdaptivePreference.Speed,
+        "Economy was not dynamically overridden with Speed.");
 }
 
-static void TestUndefinedScoreDoesNotBlockSwitch()
+static void TestIdleCallsOverrideSpeed()
 {
     var now = DateTimeOffset.UtcNow;
-    var policy = Policy(RoutingMode.Economy);
     var evaluation = RoutingEngine.Evaluate(
-        [Provider(1, 0.01, true, 0.99, now, 1_000), Provider(2, 0, true, 0.99, now, 2_000)],
+        [
+            Provider(1, 0.01, true, 0.99, now, 1_000, outputTps: 20),
+            Provider(2, 0.05, true, 0.99, now, 100, outputTps: 100)
+        ],
         [Group(1), Group(2)],
         new Dictionary<long, double>(),
-        policy,
-        now);
-    var result = RouteDecisionEngine.Decide(
-        evaluation,
-        new RouteState { CurrentGroupId = 1 },
-        policy,
-        now,
-        observedCurrentGroupId: 1);
-    Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 2,
-        "An undefined weighted score blocked a zero-price route.");
-}
-
-static void TestZeroPriceTieDoesNotInvokeStabilityHold()
-{
-    var now = DateTimeOffset.UtcNow;
-    var policy = Policy(RoutingMode.Economy);
-    var evaluation = RoutingEngine.Evaluate(
-        [Provider(1, 0, true, 0.99, now, 1_000), Provider(2, 0, true, 0.99, now, 500)],
-        [Group(1), Group(2)],
-        new Dictionary<long, double>(),
-        policy,
-        now);
-    var result = RouteDecisionEngine.Decide(
-        evaluation,
-        new RouteState { CurrentGroupId = 1 },
-        policy,
-        now,
-        observedCurrentGroupId: 1);
-    Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 2,
-        "Placeholder zero-price scores incorrectly triggered the stability hold.");
-}
-
-static void TestUnknownLatencyTieDoesNotInvokeStabilityHold()
-{
-    var now = DateTimeOffset.UtcNow;
-    var policy = Policy(RoutingMode.Balanced);
-    var evaluation = RoutingEngine.Evaluate(
-        [Provider(1, 0.02, true, 0.99, now, null), Provider(2, 0.02, true, 0.99, now, null)],
-        [Group(1), Group(2)],
-        new Dictionary<long, double>(),
-        policy,
+        Policy(RoutingMode.Economy),
         now);
     var result = RouteDecisionEngine.Decide(
         evaluation,
         new RouteState { CurrentGroupId = 2 },
-        policy,
+        Policy(RoutingMode.Economy),
+        new AdaptiveRoutingContext(RoutingMode.Speed, TaskDurationCategory.Short, 31),
         now,
         observedCurrentGroupId: 2);
     Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 1,
-        "Placeholder unknown-latency scores incorrectly triggered the stability hold.");
+        "An idle Speed preference did not switch to the cheaper candidate.");
+    Assert(result.Decision.EffectivePreference == AdaptivePreference.Cost,
+        "Idle time did not override Speed with Cost.");
+}
+
+static void TestAdaptiveRejectionKeepsCurrentGroup()
+{
+    var now = DateTimeOffset.UtcNow;
+    var evaluation = RoutingEngine.Evaluate(
+        [
+            Provider(1, 0.05, true, 0.99, now, 1_000, outputTps: 20),
+            Provider(2, 0.02, true, 0.99, now, 1_000, outputTps: 5)
+        ],
+        [Group(1), Group(2)],
+        new Dictionary<long, double>(),
+        Policy(RoutingMode.Balanced),
+        now);
+    var result = RouteDecisionEngine.Decide(
+        evaluation,
+        new RouteState { CurrentGroupId = 1 },
+        Policy(RoutingMode.Balanced),
+        new AdaptiveRoutingContext(RoutingMode.Balanced, TaskDurationCategory.Medium, 10),
+        now,
+        observedCurrentGroupId: 1);
+    Assert(!result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 1,
+        "A rejected adaptive candidate replaced the current group.");
+    Assert(result.Decision.Reason == RouteDecisionReason.AdaptiveBalancedRejected,
+        "The rejection did not expose its adaptive reason.");
+}
+
+static void TestAdaptiveAcceptanceUpdatesKeys()
+{
+    var now = DateTimeOffset.UtcNow;
+    var api = new StubRoutingClient(now)
+    {
+        ProvidersOverride =
+        [
+            Provider(1, 0.05, true, 1, now, 1_000, outputTps: 20, lastCallEndedAt: now.AddSeconds(-10)),
+            Provider(2, 0.02, true, 1, now, 1_000, outputTps: 20)
+        ],
+        GroupsOverride = [Group(1), Group(2)]
+    };
+    var settings = new PersistentAppSettings
+    {
+        RoutingMode = RoutingMode.Balanced,
+        DurationCategory = TaskDurationCategory.Medium,
+        KeySelectionInitialized = true,
+        SelectedKeyIds = [10]
+    };
+    using var service = new RoutingService(
+        settings,
+        new PersistentCredentials { BearerToken = "synthetic-access" },
+        new MemoryRouteStateStore(),
+        new StubRoutingClientFactory(api),
+        utcNow: () => now);
+
+    var result = service.RunOnceAsync().GetAwaiter().GetResult();
+    Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 2 && api.UpdateCalls == 1,
+        "An accepted adaptive decision did not update the selected Key.");
+    Assert(result.Decision.EffectivePreference == AdaptivePreference.Balanced &&
+        result.Decision.CurrentIntervalSeconds == 10,
+        "The service did not expose the interval-derived effective preference.");
+}
+
+static void TestAdaptiveRecoveryBypassesGuard()
+{
+    var now = DateTimeOffset.UtcNow;
+    var evaluation = RoutingEngine.Evaluate(
+        [Provider(2, 0.02, true, 0.99, now, 1_000, outputTps: 0)],
+        [Group(2)],
+        new Dictionary<long, double>(),
+        Policy(RoutingMode.Balanced),
+        now);
+    var initial = RouteDecisionEngine.Decide(
+        evaluation,
+        new RouteState(),
+        Policy(RoutingMode.Balanced),
+        new AdaptiveRoutingContext(RoutingMode.Balanced, TaskDurationCategory.Short, 10),
+        now);
+    var invalid = RouteDecisionEngine.Decide(
+        evaluation,
+        new RouteState { CurrentGroupId = 9 },
+        Policy(RoutingMode.Balanced),
+        new AdaptiveRoutingContext(RoutingMode.Balanced, TaskDurationCategory.Short, 10),
+        now,
+        observedCurrentGroupId: 9);
+
+    Assert(initial.Decision.ShouldSwitch && initial.Decision.Reason == RouteDecisionReason.InitialRoute,
+        "Initial routing was blocked by pairwise safeguards.");
+    Assert(invalid.Decision.ShouldSwitch && invalid.Decision.Reason == RouteDecisionReason.CurrentRouteInvalid,
+        "Invalid-route recovery was blocked by pairwise safeguards.");
 }
 
 static void TestMissingLatencyRanksLast()
@@ -798,19 +832,23 @@ static void TestWeightedSpeedWinnerSwitchesImmediately()
 {
     var now = DateTimeOffset.UtcNow;
     var evaluation = RoutingEngine.Evaluate(
-        [Provider(1, 0.02, true, 0.99, now, 10_000), Provider(2, 0.021, true, 0.99, now, 1_000)],
+        [
+            Provider(1, 0.02, true, 0.99, now, 10_000, outputTps: 20),
+            Provider(2, 0.021, true, 0.99, now, 1_000, outputTps: 30)
+        ],
         [Group(1), Group(2)],
         new Dictionary<long, double>(),
-        Policy(RoutingMode.Balanced),
+        Policy(RoutingMode.Speed),
         now);
     var result = RouteDecisionEngine.Decide(
         evaluation,
         new RouteState { CurrentGroupId = 1 },
-        Policy(RoutingMode.Balanced),
+        Policy(RoutingMode.Speed),
+        new AdaptiveRoutingContext(RoutingMode.Speed, TaskDurationCategory.Medium, 2),
         now,
         1);
-    Assert(result.Decision.ShouldSwitch && result.Decision.Reason == RouteDecisionReason.FasterForWeightedTradeoff,
-        "A clear weighted speed winner did not switch immediately.");
+    Assert(result.Decision.ShouldSwitch && result.Decision.Reason == RouteDecisionReason.AdaptiveSpeedAccepted,
+        "A candidate above the adaptive Speed threshold did not switch.");
 }
 
 static void TestAlreadyOptimalRouteDecision()
@@ -1574,7 +1612,9 @@ static ProviderStatus Provider(
     double success,
     DateTimeOffset checkedAt,
     double? latency = 1000,
-    bool warning = false)
+    bool warning = false,
+    double? outputTps = 20,
+    DateTimeOffset? lastCallEndedAt = null)
 {
     return new ProviderStatus
     {
@@ -1586,7 +1626,9 @@ static ProviderStatus Provider(
         Available = available,
         Enabled = true,
         CheckedAt = checkedAt,
+        LastCallEndedAt = lastCallEndedAt,
         FirstTokenLatencyMs = latency,
+        OutputTokensPerSecond = outputTps,
         SuccessRates = new Dictionary<string, double> { ["6h"] = success },
         WarningReasons = warning
             ? [new ProviderWarningReason { Type = "synthetic_warning", Message = "synthetic warning" }]
@@ -1662,6 +1704,8 @@ sealed class StubRoutingClient(DateTimeOffset now) : IAIHubApiClient
     public bool MixedGroups { get; init; }
     public int FailUpdateCount { get; init; }
     public double? UserRateOverride { get; init; }
+    public IReadOnlyList<ProviderStatus>? ProvidersOverride { get; init; }
+    public IReadOnlyList<GroupInfo>? GroupsOverride { get; init; }
 
     public Task<MonitorSummary> GetProviderSummaryAsync(CancellationToken cancellationToken = default)
     {
@@ -1671,7 +1715,7 @@ sealed class StubRoutingClient(DateTimeOffset now) : IAIHubApiClient
             throw new AIHubApiException("Authentication required.", HttpStatusCode.Unauthorized, "401");
         return Task.FromResult(new MonitorSummary
         {
-            Apis = [ProviderForStub(2, now)]
+            Apis = ProvidersOverride?.ToList() ?? [ProviderForStub(2, now)]
         });
     }
 
@@ -1693,7 +1737,7 @@ sealed class StubRoutingClient(DateTimeOffset now) : IAIHubApiClient
     public Task<IReadOnlyList<GroupInfo>> GetAvailableGroupsAsync(CancellationToken cancellationToken = default)
     {
         GroupsCalls++;
-        return Task.FromResult<IReadOnlyList<GroupInfo>>([GroupForStub(2)]);
+        return Task.FromResult(GroupsOverride ?? [GroupForStub(2)]);
     }
 
     public Task<IReadOnlyDictionary<long, double>> GetUserGroupRatesAsync(CancellationToken cancellationToken = default)
@@ -1755,6 +1799,7 @@ sealed class StubRoutingClient(DateTimeOffset now) : IAIHubApiClient
         Enabled = true,
         CheckedAt = checkedAt,
         FirstTokenLatencyMs = 500,
+        OutputTokensPerSecond = 20,
         SuccessRates = new Dictionary<string, double> { ["6h"] = 1 }
     };
 

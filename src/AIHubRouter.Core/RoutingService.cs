@@ -123,17 +123,36 @@ public sealed class RoutingService : IDisposable
         }
 
         var observedGroupId = ResolveObservedGroup(selectedKeys);
-        var policy = _settings.CreatePolicy();
+        var state = _stateStore.Load();
+        var currentGroupId = observedGroupId ?? state.CurrentGroupId;
+        var basePolicy = _settings.CreatePolicy();
+        var currentInterval = AdaptiveSwitchDecisionEngine.ResolveCurrentIntervalSeconds(
+            summary.Apis,
+            currentGroupId,
+            basePolicy.Platform,
+            now);
+        var basePreference = AdaptiveSwitchDecisionEngine.ToPreference(basePolicy.Mode);
+        var effectivePreference = AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(
+            currentInterval,
+            basePreference);
+        var effectivePolicy = basePolicy with
+        {
+            Mode = AdaptiveSwitchDecisionEngine.ToRoutingMode(effectivePreference)
+        };
         var evaluation = RoutingEngine.Evaluate(
             summary.Apis,
             _cachedGroups,
             _cachedRates,
-            policy,
+            effectivePolicy,
             now);
         var decisionResult = RouteDecisionEngine.Decide(
             evaluation,
-            _stateStore.Load(),
-            policy,
+            state,
+            effectivePolicy,
+            new AdaptiveRoutingContext(
+                basePolicy.Mode,
+                _settings.DurationCategory,
+                currentInterval),
             now,
             observedGroupId);
         var keyResults = new List<KeyRouteResult>();

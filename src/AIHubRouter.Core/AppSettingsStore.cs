@@ -11,6 +11,7 @@ public sealed class PersistentAppSettings
     public string BaseUrl { get; init; } = "https://aihub.top";
     public string Platform { get; init; } = "openai";
     public RoutingMode RoutingMode { get; init; } = RoutingMode.Economy;
+    public TaskDurationCategory DurationCategory { get; init; } = TaskDurationCategory.Medium;
     public int MinimumSuccessPercent { get; init; }
     public int PollingIntervalSeconds { get; init; } = 60;
     public int AccountCacheSeconds { get; init; } = 300;

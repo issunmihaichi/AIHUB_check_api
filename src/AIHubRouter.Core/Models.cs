@@ -183,13 +183,10 @@ public enum WinFormsTheme
 
 public sealed record BalancedRoutingPolicy
 {
-    public const double DefaultMinimumScoreAdvantageToSwitch = 0.05;
-
     public string Platform { get; init; } = "openai";
     public RoutingMode Mode { get; init; } = RoutingMode.Economy;
     public double MinimumSuccessRate6h { get; init; } = 0;
     public TimeSpan MaximumStatusAge { get; init; } = TimeSpan.FromMinutes(15);
-    public double? MinimumScoreAdvantageOverride { get; init; }
 
     public double PriceWeight => Mode switch
     {
@@ -200,9 +197,6 @@ public sealed record BalancedRoutingPolicy
     };
 
     public double LatencyWeight => 1 - PriceWeight;
-
-    public double MinimumScoreAdvantageToSwitch =>
-        MinimumScoreAdvantageOverride ?? DefaultMinimumScoreAdvantageToSwitch;
 
     public void Validate()
     {
@@ -226,11 +220,6 @@ public sealed record BalancedRoutingPolicy
             throw new ArgumentOutOfRangeException(nameof(Mode));
         }
 
-        if (MinimumScoreAdvantageOverride is { } advantage &&
-            (advantage < 0 || !double.IsFinite(advantage)))
-        {
-            throw new ArgumentOutOfRangeException(nameof(MinimumScoreAdvantageOverride));
-        }
     }
 }
 
@@ -251,7 +240,17 @@ public enum RouteDecisionReason
     AlreadyOptimal,
     ScoreAdvantageTooSmall,
     BetterPrice,
-    FasterForWeightedTradeoff
+    FasterForWeightedTradeoff,
+    AdaptiveCostAccepted,
+    AdaptiveBalancedAccepted,
+    AdaptiveSpeedAccepted,
+    AdaptivePriceNotLower,
+    AdaptiveShortTaskProtected,
+    AdaptiveRemainingWorkTooSmall,
+    AdaptiveCostRejected,
+    AdaptiveBalancedRejected,
+    AdaptiveSpeedRejected,
+    AdaptiveUnknownPreference
 }
 
 public sealed record RouteDecision(
@@ -261,7 +260,19 @@ public sealed record RouteDecision(
     RouteDecisionReason Reason,
     double PricePremiumPercent,
     double? LatencyImprovementPercent,
-    DateTimeOffset EvaluatedAt);
+    DateTimeOffset EvaluatedAt)
+{
+    public AdaptivePreference? EffectivePreference { get; init; }
+    public TaskDurationCategory? DurationCategory { get; init; }
+    public double? CurrentIntervalSeconds { get; init; }
+    public AdaptiveSwitchDecision? AdaptiveDecision { get; init; }
+    public string Detail { get; init; } = string.Empty;
+}
+
+public sealed record AdaptiveRoutingContext(
+    RoutingMode BaseMode,
+    TaskDurationCategory DurationCategory,
+    double? CurrentIntervalSeconds);
 
 public sealed record RouteState
 {

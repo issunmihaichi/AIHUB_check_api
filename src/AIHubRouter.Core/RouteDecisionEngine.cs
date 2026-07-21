@@ -9,65 +9,159 @@ public static class RouteDecisionEngine
         RouteState state,
         BalancedRoutingPolicy policy,
         DateTimeOffset now,
+        long? observedCurrentGroupId = null) =>
+        Decide(
+            evaluation,
+            state,
+            policy,
+            new AdaptiveRoutingContext(policy.Mode, TaskDurationCategory.Medium, null),
+            now,
+            observedCurrentGroupId);
+
+    public static RouteDecisionResult Decide(
+        RouteEvaluation evaluation,
+        RouteState state,
+        BalancedRoutingPolicy policy,
+        AdaptiveRoutingContext context,
+        DateTimeOffset now,
         long? observedCurrentGroupId = null)
     {
         ArgumentNullException.ThrowIfNull(evaluation);
         ArgumentNullException.ThrowIfNull(state);
         ArgumentNullException.ThrowIfNull(policy);
+        ArgumentNullException.ThrowIfNull(context);
         policy.Validate();
 
+        var effectivePreference = AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(
+            context.CurrentIntervalSeconds,
+            AdaptiveSwitchDecisionEngine.ToPreference(context.BaseMode));
         var currentGroupId = observedCurrentGroupId ?? state.CurrentGroupId;
-        var current = evaluation.EligibleCandidates.FirstOrDefault(candidate => candidate.Group.Id == currentGroupId);
-        var target = evaluation.Recommended;
+        var current = evaluation.EligibleCandidates.FirstOrDefault(
+            candidate => candidate.Group.Id == currentGroupId);
+        var target = effectivePreference == AdaptivePreference.Cost
+            ? evaluation.Baseline
+            : evaluation.Recommended;
         if (target is null)
         {
-            return Result(current, null, false, RouteDecisionReason.NoCandidate,
-                new RouteState { CurrentGroupId = currentGroupId }, 0, null, now);
+            return Enrich(
+                Result(current, null, false, RouteDecisionReason.NoCandidate,
+                    new RouteState { CurrentGroupId = currentGroupId }, 0, null, now),
+                context,
+                effectivePreference,
+                adaptiveDecision: null,
+                "没有符合条件的路由");
         }
 
         var premium = CalculatePremium(evaluation.MinimumMultiplier, target.EffectiveMultiplier);
         if (currentGroupId is null)
         {
-            return Switched(current, target, RouteDecisionReason.InitialRoute, state, premium, null, now);
+            return Enrich(
+                Switched(current, target, RouteDecisionReason.InitialRoute, state, premium, null, now),
+                context,
+                effectivePreference,
+                adaptiveDecision: null,
+                "建立初始路由");
         }
 
         if (current is null)
         {
-            return Switched(current, target, RouteDecisionReason.CurrentRouteInvalid, state, premium, null, now);
+            return Enrich(
+                Switched(current, target, RouteDecisionReason.CurrentRouteInvalid, state, premium, null, now),
+                context,
+                effectivePreference,
+                adaptiveDecision: null,
+                "当前路由已不可用");
         }
 
         if (current.Group.Id == target.Group.Id)
         {
-            return Result(current, target, false, RouteDecisionReason.AlreadyOptimal,
-                new RouteState { CurrentGroupId = current.Group.Id }, premium, 0, now);
+            return Enrich(
+                Result(current, target, false, RouteDecisionReason.AlreadyOptimal,
+                    new RouteState { CurrentGroupId = current.Group.Id }, premium, 0, now),
+                context,
+                effectivePreference,
+                adaptiveDecision: null,
+                "当前路由已是最优");
         }
 
+        var adaptiveDecision = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+            current.EffectiveMultiplier,
+            target.EffectiveMultiplier,
+            ToSeconds(current.Provider.FirstTokenLatencyMs),
+            ToSeconds(target.Provider.FirstTokenLatencyMs),
+            current.Provider.OutputTokensPerSecond ?? 0,
+            target.Provider.OutputTokensPerSecond ?? 0,
+            context.DurationCategory,
+            AdaptiveSwitchDecisionEngine.ToPreference(context.BaseMode),
+            context.CurrentIntervalSeconds));
         var latencyImprovement = CalculateLatencyImprovement(
             current.Provider.FirstTokenLatencyMs,
             target.Provider.FirstTokenLatencyMs);
-        if (evaluation.MinimumMultiplier is > 0 &&
-            HasFinitePositiveLatency(current.Provider.FirstTokenLatencyMs) &&
-            HasFinitePositiveLatency(target.Provider.FirstTokenLatencyMs) &&
-            evaluation.CandidateScores.TryGetValue(current.Group.Id, out var currentScore) &&
-            evaluation.CandidateScores.TryGetValue(target.Group.Id, out var targetScore) &&
-            targetScore - currentScore <= policy.MinimumScoreAdvantageToSwitch)
+
+        if (adaptiveDecision.ShouldSwitch)
         {
-            return Result(
+            return Enrich(
+                Switched(
+                    current,
+                    target,
+                    MapReason(adaptiveDecision.Reason),
+                    state,
+                    premium,
+                    latencyImprovement,
+                    now),
+                context,
+                effectivePreference,
+                adaptiveDecision,
+                adaptiveDecision.Detail);
+        }
+
+        return Enrich(
+            Result(
                 current,
                 current,
                 false,
-                RouteDecisionReason.ScoreAdvantageTooSmall,
+                MapReason(adaptiveDecision.Reason),
                 new RouteState { CurrentGroupId = current.Group.Id },
                 CalculatePremium(evaluation.MinimumMultiplier, current.EffectiveMultiplier),
                 0,
-                now);
-        }
-
-        var reason = target.EffectiveMultiplier < current.EffectiveMultiplier
-            ? RouteDecisionReason.BetterPrice
-            : RouteDecisionReason.FasterForWeightedTradeoff;
-        return Switched(current, target, reason, state, premium, latencyImprovement, now);
+                now),
+            context,
+            effectivePreference,
+            adaptiveDecision,
+            adaptiveDecision.Detail);
     }
+
+    private static RouteDecisionResult Enrich(
+        RouteDecisionResult result,
+        AdaptiveRoutingContext context,
+        AdaptivePreference effectivePreference,
+        AdaptiveSwitchDecision? adaptiveDecision,
+        string detail) =>
+        result with
+        {
+            Decision = result.Decision with
+            {
+                EffectivePreference = effectivePreference,
+                DurationCategory = context.DurationCategory,
+                CurrentIntervalSeconds = context.CurrentIntervalSeconds,
+                AdaptiveDecision = adaptiveDecision,
+                Detail = detail
+            }
+        };
+
+    private static RouteDecisionReason MapReason(AdaptiveDecisionReason reason) => reason switch
+    {
+        AdaptiveDecisionReason.AcceptedCost => RouteDecisionReason.AdaptiveCostAccepted,
+        AdaptiveDecisionReason.AcceptedBalanced => RouteDecisionReason.AdaptiveBalancedAccepted,
+        AdaptiveDecisionReason.AcceptedSpeed => RouteDecisionReason.AdaptiveSpeedAccepted,
+        AdaptiveDecisionReason.NewPriceNotLower => RouteDecisionReason.AdaptivePriceNotLower,
+        AdaptiveDecisionReason.ShortTaskProtected => RouteDecisionReason.AdaptiveShortTaskProtected,
+        AdaptiveDecisionReason.RemainingWorkTooSmall => RouteDecisionReason.AdaptiveRemainingWorkTooSmall,
+        AdaptiveDecisionReason.CostGuardRejected => RouteDecisionReason.AdaptiveCostRejected,
+        AdaptiveDecisionReason.BalancedGuardRejected => RouteDecisionReason.AdaptiveBalancedRejected,
+        AdaptiveDecisionReason.SpeedGuardRejected => RouteDecisionReason.AdaptiveSpeedRejected,
+        _ => RouteDecisionReason.AdaptiveUnknownPreference
+    };
 
     private static RouteDecisionResult Switched(
         RouteCandidate? current,
@@ -76,11 +170,9 @@ public static class RouteDecisionEngine
         RouteState state,
         double premium,
         double? latencyImprovement,
-        DateTimeOffset now)
-    {
-        return Result(current, target, true, reason,
+        DateTimeOffset now) =>
+        Result(current, target, true, reason,
             new RouteState { CurrentGroupId = target.Group.Id }, premium, latencyImprovement, now);
-    }
 
     private static RouteDecisionResult Result(
         RouteCandidate? current,
@@ -90,12 +182,10 @@ public static class RouteDecisionEngine
         RouteState state,
         double premium,
         double? latencyImprovement,
-        DateTimeOffset now)
-    {
-        return new RouteDecisionResult(
+        DateTimeOffset now) =>
+        new(
             new RouteDecision(current, target, shouldSwitch, reason, premium, latencyImprovement, now),
             state);
-    }
 
     private static double CalculatePremium(double? minimum, double value)
     {
@@ -119,6 +209,8 @@ public static class RouteDecisionEngine
         return (currentValue - targetValue) / currentValue * 100;
     }
 
-    private static bool HasFinitePositiveLatency(double? latency) =>
-        latency is > 0 && double.IsFinite(latency.Value);
+    private static double ToSeconds(double? milliseconds) =>
+        milliseconds is >= 0 && double.IsFinite(milliseconds.Value)
+            ? milliseconds.Value / 1_000
+            : double.PositiveInfinity;
 }
