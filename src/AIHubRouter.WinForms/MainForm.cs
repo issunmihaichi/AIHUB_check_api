@@ -310,6 +310,8 @@ internal sealed partial class MainForm : Form
 
         var groupLookup = _groups.ToDictionary(group => group.Id);
         var candidateLookup = result.Evaluation.EligibleCandidates.ToDictionary(candidate => candidate.Group.Id);
+        var minimumSuccessRate6h = (double)_minimumSuccessInput.Value / 100;
+        var maximumStatusAge = TimeSpan.FromMinutes(15);
         var rows = result.Providers
             .Where(provider => provider.Platform.Equals(_platformCombo.SelectedItem?.ToString() ?? "openai", StringComparison.OrdinalIgnoreCase))
             .Select(provider =>
@@ -322,9 +324,16 @@ internal sealed partial class MainForm : Form
                     : groupId is { } currentGroupId && currentGroupId == result.Decision.Current?.Group.Id ? "当前"
                     : groupId is { } baselineGroupId && baselineGroupId == result.Evaluation.Baseline?.Group.Id ? "最低价"
                     : string.Empty;
-                var effective = groupId is { } effectiveGroup && candidateLookup.TryGetValue(effectiveGroup, out var candidate)
-                    ? $"{candidate.EffectiveMultiplier:0.####}{(candidate.HasUserRateOverride ? " *" : string.Empty)}"
-                    : $"{provider.PriceMultiplier:0.####}";
+                var overrideRate = 0d;
+                var hasOverride = groupId is { } overrideGroupId && _userRates.TryGetValue(overrideGroupId, out overrideRate);
+                var effectiveMultiplier = hasOverride ? overrideRate : provider.PriceMultiplier;
+                if (groupId is { } effectiveGroup && candidateLookup.TryGetValue(effectiveGroup, out var candidate))
+                {
+                    effectiveMultiplier = candidate.EffectiveMultiplier;
+                    hasOverride = candidate.HasUserRateOverride;
+                }
+
+                var effective = $"{effectiveMultiplier:0.####}{(hasOverride ? " *" : string.Empty)}";
                 return new ProviderGridRow
                 {
                     Source = provider,
@@ -332,7 +341,14 @@ internal sealed partial class MainForm : Form
                     EffectiveRate = effective,
                     WeightedScore = score,
                     DecisionState = decisionState,
-                    State = groupId is { } authorizedId && groupLookup.ContainsKey(authorizedId) ? "可路由" : "账号不可用"
+                    State = ProviderStatusPresentation.ResolveRoutingState(
+                        provider,
+                        hasAccountData: true,
+                        isAuthorized: groupId is { } authorizedId && groupLookup.ContainsKey(authorizedId),
+                        effectiveMultiplier: effectiveMultiplier,
+                        minimumSuccessRate6h: minimumSuccessRate6h,
+                        now: result.Decision.EvaluatedAt,
+                        maximumStatusAge: maximumStatusAge)
                 };
             })
             .OrderByDescending(row => row.IsBest)
@@ -430,6 +446,7 @@ internal sealed partial class MainForm : Form
             RouteDecisionReason.InitialRoute => "建立初始路由",
             RouteDecisionReason.CurrentRouteInvalid => "当前路由已不可用",
             RouteDecisionReason.AlreadyOptimal => "当前路由已是最优",
+            RouteDecisionReason.ScoreAdvantageTooSmall => "优势较小，保持当前路由",
             RouteDecisionReason.BetterPrice => "发现更低价格",
             RouteDecisionReason.FasterForWeightedTradeoff => "速度收益超过价格增幅",
             _ => "路由评估完成"
@@ -560,7 +577,7 @@ internal sealed partial class MainForm : Form
             .Where(provider => provider.Platform.Equals(criteria.Platform, StringComparison.OrdinalIgnoreCase))
             .Select(provider =>
             {
-                var isAuthorized = provider.GroupId is { } groupId && groups.TryGetValue(groupId, out var group);
+                var isAuthorized = provider.GroupId is { } groupId && groups.ContainsKey(groupId);
                 var overrideRate = 0d;
                 var hasOverride = provider.GroupId is { } id && _userRates.TryGetValue(id, out overrideRate);
                 var effectiveRate = hasOverride ? overrideRate : provider.PriceMultiplier;
@@ -570,17 +587,6 @@ internal sealed partial class MainForm : Form
                     effectiveRate = evaluatedCandidate.EffectiveMultiplier;
                     hasOverride = evaluatedCandidate.HasUserRateOverride;
                 }
-                var isFresh = provider.CheckedAt is { } checkedAt &&
-                    now - checkedAt >= TimeSpan.FromMinutes(-1) &&
-                    now - checkedAt <= criteria.MaximumStatusAge;
-                var state = !provider.Enabled ? "已停用"
-                    : !provider.Available ? "当前异常"
-                    : !isFresh ? "数据过期"
-                    : (provider.SuccessRate6h ?? 0) < criteria.MinimumSuccessRate6h ? "低于阈值"
-                    : _groups.Count > 0 && !isAuthorized ? "账号不可用"
-                    : _groups.Count == 0 ? "待认证"
-                    : "可路由";
-
                 return new ProviderGridRow
                 {
                     Source = provider,
@@ -595,7 +601,14 @@ internal sealed partial class MainForm : Form
                         : provider.GroupId is { } baselineGroupId &&
                             baselineGroupId == _lastEvaluation?.Baseline?.Group.Id ? "最低价"
                         : string.Empty,
-                    State = state
+                    State = ProviderStatusPresentation.ResolveRoutingState(
+                        provider,
+                        hasAccountData: _groups.Count > 0,
+                        isAuthorized: isAuthorized,
+                        effectiveMultiplier: effectiveRate,
+                        minimumSuccessRate6h: criteria.MinimumSuccessRate6h,
+                        now: now,
+                        maximumStatusAge: criteria.MaximumStatusAge)
                 };
             })
             .OrderByDescending(row => row.IsBest)

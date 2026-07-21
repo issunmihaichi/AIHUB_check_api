@@ -7,11 +7,14 @@ public static class RouteDecisionEngine
     public static RouteDecisionResult Decide(
         RouteEvaluation evaluation,
         RouteState state,
+        BalancedRoutingPolicy policy,
         DateTimeOffset now,
         long? observedCurrentGroupId = null)
     {
         ArgumentNullException.ThrowIfNull(evaluation);
         ArgumentNullException.ThrowIfNull(state);
+        ArgumentNullException.ThrowIfNull(policy);
+        policy.Validate();
 
         var currentGroupId = observedCurrentGroupId ?? state.CurrentGroupId;
         var current = evaluation.EligibleCandidates.FirstOrDefault(candidate => candidate.Group.Id == currentGroupId);
@@ -42,6 +45,24 @@ public static class RouteDecisionEngine
         var latencyImprovement = CalculateLatencyImprovement(
             current.Provider.FirstTokenLatencyMs,
             target.Provider.FirstTokenLatencyMs);
+        if (evaluation.MinimumMultiplier is > 0 &&
+            HasFinitePositiveLatency(current.Provider.FirstTokenLatencyMs) &&
+            HasFinitePositiveLatency(target.Provider.FirstTokenLatencyMs) &&
+            evaluation.CandidateScores.TryGetValue(current.Group.Id, out var currentScore) &&
+            evaluation.CandidateScores.TryGetValue(target.Group.Id, out var targetScore) &&
+            targetScore - currentScore <= policy.MinimumScoreAdvantageToSwitch)
+        {
+            return Result(
+                current,
+                current,
+                false,
+                RouteDecisionReason.ScoreAdvantageTooSmall,
+                new RouteState { CurrentGroupId = current.Group.Id },
+                CalculatePremium(evaluation.MinimumMultiplier, current.EffectiveMultiplier),
+                0,
+                now);
+        }
+
         var reason = target.EffectiveMultiplier < current.EffectiveMultiplier
             ? RouteDecisionReason.BetterPrice
             : RouteDecisionReason.FasterForWeightedTradeoff;
@@ -97,4 +118,7 @@ public static class RouteDecisionEngine
 
         return (currentValue - targetValue) / currentValue * 100;
     }
+
+    private static bool HasFinitePositiveLatency(double? latency) =>
+        latency is > 0 && double.IsFinite(latency.Value);
 }
