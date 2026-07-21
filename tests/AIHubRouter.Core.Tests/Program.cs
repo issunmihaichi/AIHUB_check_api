@@ -20,6 +20,11 @@ var tests = new (string Name, Action Body)[]
     ("Balanced mode keeps price for moderate speed gap", TestBalancedModeKeepsPriceForModerateSpeedGap),
     ("Economy mode protects price", TestEconomyModeProtectsPrice),
     ("Speed mode accepts larger price premium", TestSpeedModeAcceptsLargerPremium),
+    ("Selective policy preserves local routing weights", TestSelectivePolicyPreservesLocalWeights),
+    ("Close faster score keeps current group", TestCloseFasterScoreKeepsCurrentGroup),
+    ("Close cheaper score keeps current group", TestCloseCheaperScoreKeepsCurrentGroup),
+    ("Meaningful score advantage still switches", TestMeaningfulScoreAdvantageStillSwitches),
+    ("Undefined score does not block a switch", TestUndefinedScoreDoesNotBlockSwitch),
     ("Missing latency ranks last", TestMissingLatencyRanksLast),
     ("Invalid measurements are excluded", TestInvalidMeasurementsAreExcluded),
     ("Extreme latency scores stay finite", TestExtremeLatencyScoresStayFinite),
@@ -297,6 +302,104 @@ static void TestSpeedModeAcceptsLargerPremium()
     Assert(result.Recommended?.Group.Id == 2, "Speed mode rejected a large latency gain.");
 }
 
+static void TestSelectivePolicyPreservesLocalWeights()
+{
+    Assert(Policy(RoutingMode.Economy).PriceWeight == 0.95, "Economy weight changed.");
+    Assert(Policy(RoutingMode.Balanced).PriceWeight == 0.80, "Balanced weight changed.");
+    Assert(Policy(RoutingMode.Speed).PriceWeight == 0.35, "Speed weight changed.");
+    Assert(new PersistentAppSettings().RoutingMode == RoutingMode.Economy, "Default mode changed.");
+    Assert(Policy(RoutingMode.Balanced).MinimumScoreAdvantageToSwitch == 0.05,
+        "Stability threshold changed.");
+}
+
+static void TestCloseFasterScoreKeepsCurrentGroup()
+{
+    var now = DateTimeOffset.UtcNow;
+    var policy = Policy(RoutingMode.Balanced);
+    var evaluation = RoutingEngine.Evaluate(
+        [Provider(1, 0.02, true, 0.99, now, 1_000), Provider(2, 0.02, true, 0.99, now, 980)],
+        [Group(1), Group(2)],
+        new Dictionary<long, double>(),
+        policy,
+        now);
+    Assert(evaluation.Recommended?.Group.Id == 2, "Test setup did not recommend the slightly faster route.");
+
+    var result = RouteDecisionEngine.Decide(
+        evaluation,
+        new RouteState { CurrentGroupId = 1 },
+        policy,
+        now,
+        observedCurrentGroupId: 1);
+    Assert(!result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 1,
+        "A tiny speed advantage replaced the current group.");
+    Assert(result.Decision.Reason == RouteDecisionReason.ScoreAdvantageTooSmall,
+        "A held speed decision did not expose its stability reason.");
+}
+
+static void TestCloseCheaperScoreKeepsCurrentGroup()
+{
+    var now = DateTimeOffset.UtcNow;
+    var policy = Policy(RoutingMode.Balanced);
+    var evaluation = RoutingEngine.Evaluate(
+        [Provider(1, 0.0201, true, 0.99, now, 981), Provider(2, 0.02, true, 0.99, now, 1_000)],
+        [Group(1), Group(2)],
+        new Dictionary<long, double>(),
+        policy,
+        now);
+    Assert(evaluation.Recommended?.Group.Id == 2, "Test setup did not recommend the slightly cheaper route.");
+
+    var result = RouteDecisionEngine.Decide(
+        evaluation,
+        new RouteState { CurrentGroupId = 1 },
+        policy,
+        now,
+        observedCurrentGroupId: 1);
+    Assert(!result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 1,
+        "A tiny price advantage replaced the current group.");
+    Assert(result.Decision.Reason == RouteDecisionReason.ScoreAdvantageTooSmall,
+        "A held price decision did not expose its stability reason.");
+}
+
+static void TestMeaningfulScoreAdvantageStillSwitches()
+{
+    var now = DateTimeOffset.UtcNow;
+    var policy = Policy(RoutingMode.Balanced);
+    var evaluation = RoutingEngine.Evaluate(
+        [Provider(1, 0.02, true, 0.99, now, 1_000), Provider(2, 0.02, true, 0.99, now, 400)],
+        [Group(1), Group(2)],
+        new Dictionary<long, double>(),
+        policy,
+        now);
+    var result = RouteDecisionEngine.Decide(
+        evaluation,
+        new RouteState { CurrentGroupId = 1 },
+        policy,
+        now,
+        observedCurrentGroupId: 1);
+    Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 2,
+        "A meaningful score advantage was blocked.");
+}
+
+static void TestUndefinedScoreDoesNotBlockSwitch()
+{
+    var now = DateTimeOffset.UtcNow;
+    var policy = Policy(RoutingMode.Economy);
+    var evaluation = RoutingEngine.Evaluate(
+        [Provider(1, 0.01, true, 0.99, now, 1_000), Provider(2, 0, true, 0.99, now, 2_000)],
+        [Group(1), Group(2)],
+        new Dictionary<long, double>(),
+        policy,
+        now);
+    var result = RouteDecisionEngine.Decide(
+        evaluation,
+        new RouteState { CurrentGroupId = 1 },
+        policy,
+        now,
+        observedCurrentGroupId: 1);
+    Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 2,
+        "An undefined weighted score blocked a zero-price route.");
+}
+
 static void TestMissingLatencyRanksLast()
 {
     var now = DateTimeOffset.UtcNow;
@@ -360,7 +463,7 @@ static void TestInitialRouteDecision()
         new Dictionary<long, double>(),
         Policy(RoutingMode.Economy),
         now);
-    var result = RouteDecisionEngine.Decide(evaluation, new RouteState(), now);
+    var result = RouteDecisionEngine.Decide(evaluation, new RouteState(), Policy(RoutingMode.Economy), now);
     Assert(result.Decision.ShouldSwitch && result.Decision.Reason == RouteDecisionReason.InitialRoute,
         "Initial route was not explained as an initial route.");
     Assert(result.NextState.CurrentGroupId == 2, "Initial route state did not target the recommendation.");
@@ -375,7 +478,12 @@ static void TestWeightedSpeedWinnerSwitchesImmediately()
         new Dictionary<long, double>(),
         Policy(RoutingMode.Balanced),
         now);
-    var result = RouteDecisionEngine.Decide(evaluation, new RouteState { CurrentGroupId = 1 }, now, 1);
+    var result = RouteDecisionEngine.Decide(
+        evaluation,
+        new RouteState { CurrentGroupId = 1 },
+        Policy(RoutingMode.Balanced),
+        now,
+        1);
     Assert(result.Decision.ShouldSwitch && result.Decision.Reason == RouteDecisionReason.FasterForWeightedTradeoff,
         "A clear weighted speed winner did not switch immediately.");
 }
@@ -389,7 +497,12 @@ static void TestAlreadyOptimalRouteDecision()
         new Dictionary<long, double>(),
         Policy(RoutingMode.Economy),
         now);
-    var result = RouteDecisionEngine.Decide(evaluation, new RouteState { CurrentGroupId = 1 }, now, 1);
+    var result = RouteDecisionEngine.Decide(
+        evaluation,
+        new RouteState { CurrentGroupId = 1 },
+        Policy(RoutingMode.Economy),
+        now,
+        1);
     Assert(!result.Decision.ShouldSwitch && result.Decision.Reason == RouteDecisionReason.AlreadyOptimal,
         "An already optimal route was not recognized.");
 }
@@ -403,7 +516,12 @@ static void TestInvalidCurrentRouteDecision()
         new Dictionary<long, double>(),
         Policy(RoutingMode.Economy),
         now);
-    var result = RouteDecisionEngine.Decide(evaluation, new RouteState { CurrentGroupId = 1 }, now, 1);
+    var result = RouteDecisionEngine.Decide(
+        evaluation,
+        new RouteState { CurrentGroupId = 1 },
+        Policy(RoutingMode.Economy),
+        now,
+        1);
     Assert(result.Decision.ShouldSwitch && result.Decision.Reason == RouteDecisionReason.CurrentRouteInvalid,
         "An invalid current route was not explained.");
 }
@@ -417,7 +535,12 @@ static void TestNoCandidateDecision()
         new Dictionary<long, double>(),
         Policy(RoutingMode.Economy),
         now);
-    var result = RouteDecisionEngine.Decide(evaluation, new RouteState { CurrentGroupId = 7 }, now, 7);
+    var result = RouteDecisionEngine.Decide(
+        evaluation,
+        new RouteState { CurrentGroupId = 7 },
+        Policy(RoutingMode.Economy),
+        now,
+        7);
     Assert(!result.Decision.ShouldSwitch && result.Decision.Reason == RouteDecisionReason.NoCandidate,
         "No-candidate route did not preserve a safe decision.");
     Assert(result.NextState.CurrentGroupId == 7, "No-candidate route lost the observed group.");

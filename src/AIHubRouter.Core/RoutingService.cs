@@ -123,15 +123,17 @@ public sealed class RoutingService : IDisposable
         }
 
         var observedGroupId = ResolveObservedGroup(selectedKeys);
+        var policy = _settings.CreatePolicy();
         var evaluation = RoutingEngine.Evaluate(
             summary.Apis,
             _cachedGroups,
             _cachedRates,
-            _settings.CreatePolicy(),
+            policy,
             now);
         var decisionResult = RouteDecisionEngine.Decide(
             evaluation,
             _stateStore.Load(),
+            policy,
             now,
             observedGroupId);
         var keyResults = new List<KeyRouteResult>();

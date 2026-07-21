@@ -156,10 +156,13 @@ public enum WinFormsTheme
 
 public sealed record BalancedRoutingPolicy
 {
+    public const double DefaultMinimumScoreAdvantageToSwitch = 0.05;
+
     public string Platform { get; init; } = "openai";
     public RoutingMode Mode { get; init; } = RoutingMode.Economy;
     public double MinimumSuccessRate6h { get; init; } = 0;
     public TimeSpan MaximumStatusAge { get; init; } = TimeSpan.FromMinutes(15);
+    public double? MinimumScoreAdvantageOverride { get; init; }
 
     public double PriceWeight => Mode switch
     {
@@ -170,6 +173,9 @@ public sealed record BalancedRoutingPolicy
     };
 
     public double LatencyWeight => 1 - PriceWeight;
+
+    public double MinimumScoreAdvantageToSwitch =>
+        MinimumScoreAdvantageOverride ?? DefaultMinimumScoreAdvantageToSwitch;
 
     public void Validate()
     {
@@ -192,6 +198,12 @@ public sealed record BalancedRoutingPolicy
         {
             throw new ArgumentOutOfRangeException(nameof(Mode));
         }
+
+        if (MinimumScoreAdvantageOverride is { } advantage &&
+            (advantage < 0 || !double.IsFinite(advantage)))
+        {
+            throw new ArgumentOutOfRangeException(nameof(MinimumScoreAdvantageOverride));
+        }
     }
 }
 
@@ -210,6 +222,7 @@ public enum RouteDecisionReason
     InitialRoute,
     CurrentRouteInvalid,
     AlreadyOptimal,
+    ScoreAdvantageTooSmall,
     BetterPrice,
     FasterForWeightedTradeoff
 }
