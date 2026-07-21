@@ -56,6 +56,7 @@ var tests = new (string Name, Action Body)[]
     ("Extreme latency scores stay finite", TestExtremeLatencyScoresStayFinite),
     ("Zero multiplier remains free", TestZeroMultiplierWindow),
     ("Initial route has an explainable reason", TestInitialRouteDecision),
+    ("Preview and simulation share the initial route decision", TestPreviewAndSimulationShareInitialDecision),
     ("Adaptive speed winner switches after guard", TestWeightedSpeedWinnerSwitchesImmediately),
     ("Already optimal route does not switch", TestAlreadyOptimalRouteDecision),
     ("Invalid current route switches", TestInvalidCurrentRouteDecision),
@@ -234,13 +235,14 @@ static void TestAdaptiveConstants()
     Assert(AdaptiveRoutingConstants.InputPricePerMillion == 5.0, "Input price constant changed.");
     Assert(AdaptiveRoutingConstants.OutputPricePerMillion == 30.0, "Output price constant changed.");
     Assert(AdaptiveRoutingConstants.PenaltyTokens == 300_000, "Penalty token constant changed.");
+    Assert(AdaptiveRoutingConstants.PlanningTokensPerSecond == 43.6, "Planning token rate was not doubled for sub-agent calls.");
 
     var shortConfig = AdaptiveRoutingConstants.Duration(TaskDurationCategory.Short);
     var mediumConfig = AdaptiveRoutingConstants.Duration(TaskDurationCategory.Medium);
     var longConfig = AdaptiveRoutingConstants.Duration(TaskDurationCategory.Long);
-    Assert(shortConfig == new DurationConfiguration(0, 78_480, 3_600), "Short duration config changed.");
-    Assert(mediumConfig == new DurationConfiguration(78_480, 313_920, 7_200), "Medium duration config changed.");
-    Assert(longConfig == new DurationConfiguration(313_920, 1_883_520, 21_600), "Long duration config changed.");
+    Assert(shortConfig == new DurationConfiguration(0, 156_960, 3_600), "Short duration config changed.");
+    Assert(mediumConfig == new DurationConfiguration(156_960, 627_840, 7_200), "Medium duration config changed.");
+    Assert(longConfig == new DurationConfiguration(627_840, 3_767_040, 21_600), "Long duration config changed.");
 }
 
 static void TestAdaptivePreferenceBoundaries()
@@ -318,13 +320,13 @@ static void TestAdaptiveCostAcceptsPositiveSaving()
 
     Assert(result.ShouldSwitch && result.Reason == AdaptiveDecisionReason.AcceptedCost,
         "Cost mode rejected a positive net saving within the completion cap.");
-    Assert(result.RemainingTokens == 78_480 && result.NetSavingUsd > 0,
+    Assert(result.RemainingTokens == 156_960 && result.NetSavingUsd > 0,
         "Cost mode did not use the optimistic Short token estimate.");
 }
 
 static void TestAdaptiveCostRejectsSlowCandidate()
 {
-    var exactBoundarySpeed = 78_480d / AdaptiveRoutingConstants.MaximumCostCompletionSeconds;
+    var exactBoundarySpeed = 156_960d / AdaptiveRoutingConstants.MaximumCostCompletionSeconds;
     var result = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
         0.02, 0.01, 0, 0, 20, exactBoundarySpeed,
         TaskDurationCategory.Short, AdaptivePreference.Cost, 31));
@@ -1000,6 +1002,29 @@ static void TestWeightedSpeedWinnerSwitchesImmediately()
         1);
     Assert(result.Decision.ShouldSwitch && result.Decision.Reason == RouteDecisionReason.AdaptiveSpeedAccepted,
         "A candidate above the adaptive Speed threshold did not switch.");
+}
+
+static void TestPreviewAndSimulationShareInitialDecision()
+{
+    var now = DateTimeOffset.UtcNow;
+    var providers = new[]
+    {
+        Provider(1, 0.01, true, 0.99, now, 10_000),
+        Provider(2, 0.02, true, 0.99, now, 100)
+    };
+    var snapshot = RouteDecisionCoordinator.Evaluate(
+        providers,
+        [Group(1), Group(2)],
+        new Dictionary<long, double>(),
+        Policy(RoutingMode.Economy),
+        TaskDurationCategory.Medium,
+        new RouteState(),
+        now);
+
+    Assert(snapshot.Result.Decision.Target?.Group.Id == 1,
+        "Preview and simulation did not share the strict-cheapest initial route.");
+    Assert(snapshot.Evaluation.Recommended?.Group.Id == 2,
+        "Regression setup no longer separates weighted and strict-cheapest recommendations.");
 }
 
 static void TestAlreadyOptimalRouteDecision()

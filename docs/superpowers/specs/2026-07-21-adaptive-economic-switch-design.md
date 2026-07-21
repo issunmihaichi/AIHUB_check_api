@@ -30,7 +30,8 @@ Core owns one `AdaptiveRoutingConstants` class:
 - input price: `5.0` USD per million tokens;
 - output price: `30.0` USD per million tokens;
 - context-miss penalty: `300_000` input tokens;
-- generated-token planning rate: `21.8` tokens per second;
+- generated-token planning rate: `43.6` tokens per second, accounting for
+  sub-agent calls consuming roughly twice the token budget;
 - minimum useful remaining work: `1_000` tokens;
 - maximum completion time in Cost mode: `86_400` seconds.
 
@@ -38,12 +39,12 @@ Duration configuration is immutable:
 
 | Category | `R_min` | `R_max` | Expected time |
 | --- | ---: | ---: | ---: |
-| Short | 0 | 78,480 | 3,600 s |
-| Medium | 78,480 | 313,920 | 7,200 s |
-| Long | 313,920 | 1,883,520 | 21,600 s |
+| Short | 0 | 156,960 | 3,600 s |
+| Medium | 156,960 | 627,840 | 7,200 s |
+| Long | 627,840 | 3,767,040 | 21,600 s |
 
 The maximum values use the next duration boundary. Long is capped at 24 hours
-times 21.8 tokens per second.
+times 43.6 tokens per second.
 
 ## Preferences And Candidate Proposal
 
