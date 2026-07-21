@@ -40,6 +40,12 @@ public sealed class ProviderStatus
     [JsonPropertyName("checkedAt")]
     public DateTimeOffset? CheckedAt { get; init; }
 
+    [JsonPropertyName("lastCallEndedAt")]
+    public DateTimeOffset? LastCallEndedAt { get; init; }
+
+    [JsonPropertyName("lastCallAt")]
+    public DateTimeOffset? LastCallAt { get; init; }
+
     [JsonPropertyName("firstTokenLatencyMs")]
     public double? FirstTokenLatencyMs { get; init; }
 
@@ -58,6 +64,8 @@ public sealed class ProviderStatus
     public double? SuccessRate6h => SuccessRates.TryGetValue("6h", out var value) ? value : null;
 
     public bool HasWarnings => WarningReasons is { Count: > 0 };
+
+    public DateTimeOffset? ResolvedLastCallEndedAt => LastCallEndedAt ?? LastCallAt;
 }
 
 public sealed class ProviderWarningReason
@@ -146,6 +154,25 @@ public enum RoutingMode
     Balanced,
     Speed
 }
+
+public enum TaskDurationCategory
+{
+    Short,
+    Medium,
+    Long
+}
+
+public enum AdaptivePreference
+{
+    Cost,
+    Balanced,
+    Speed
+}
+
+public sealed record DurationConfiguration(
+    double MinimumRemainingTokens,
+    double MaximumRemainingTokens,
+    double ExpectedCompletionSeconds);
 
 public enum WinFormsTheme
 {

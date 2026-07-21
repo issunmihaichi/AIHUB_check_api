@@ -12,6 +12,11 @@ var tests = new (string Name, Action Body)[]
     ("Availability threshold", TestAvailabilityThreshold),
     ("Provider warnings deserialize", TestProviderWarningsDeserialize),
     ("Null provider warnings are tolerated", TestNullProviderWarningsAreTolerated),
+    ("Provider last-call aliases deserialize", TestProviderLastCallAliasesDeserialize),
+    ("Adaptive constants match supplied economics", TestAdaptiveConstants),
+    ("Adaptive preference follows interval boundaries", TestAdaptivePreferenceBoundaries),
+    ("Current-group interval uses latest provider call", TestCurrentGroupIntervalResolution),
+    ("Missing call time retains base preference", TestMissingCallTimeRetainsBasePreference),
     ("Warning provider remains eligible", TestWarningProviderRemainsEligible),
     ("Latest unavailable state remains ineligible", TestLatestUnavailableStateRemainsIneligible),
     ("Warning presentation excludes server message", TestWarningPresentationExcludesServerMessage),
@@ -182,6 +187,87 @@ static void TestNullProviderWarningsAreTolerated()
         {"id":"provider-1","warningReasons":null}
         """)!;
     Assert(!provider.HasWarnings, "A null warning list was not treated as empty.");
+}
+
+static void TestProviderLastCallAliasesDeserialize()
+{
+    var providers = JsonSerializer.Deserialize<ProviderStatus[]>("""
+        [
+          {
+            "id":"preferred",
+            "lastCallEndedAt":"2026-07-21T10:00:00Z",
+            "lastCallAt":"2026-07-21T09:00:00Z"
+          },
+          {
+            "id":"compatible",
+            "lastCallAt":"2026-07-21T08:00:00Z"
+          }
+        ]
+        """)!;
+
+    Assert(providers[0].ResolvedLastCallEndedAt == DateTimeOffset.Parse("2026-07-21T10:00:00Z"),
+        "lastCallEndedAt did not take precedence over the compatibility alias.");
+    Assert(providers[1].ResolvedLastCallEndedAt == DateTimeOffset.Parse("2026-07-21T08:00:00Z"),
+        "lastCallAt was not accepted as a compatibility alias.");
+}
+
+static void TestAdaptiveConstants()
+{
+    Assert(AdaptiveRoutingConstants.InputPricePerMillion == 5.0, "Input price constant changed.");
+    Assert(AdaptiveRoutingConstants.OutputPricePerMillion == 30.0, "Output price constant changed.");
+    Assert(AdaptiveRoutingConstants.PenaltyTokens == 300_000, "Penalty token constant changed.");
+
+    var shortConfig = AdaptiveRoutingConstants.Duration(TaskDurationCategory.Short);
+    var mediumConfig = AdaptiveRoutingConstants.Duration(TaskDurationCategory.Medium);
+    var longConfig = AdaptiveRoutingConstants.Duration(TaskDurationCategory.Long);
+    Assert(shortConfig == new DurationConfiguration(0, 78_480, 3_600), "Short duration config changed.");
+    Assert(mediumConfig == new DurationConfiguration(78_480, 313_920, 7_200), "Medium duration config changed.");
+    Assert(longConfig == new DurationConfiguration(313_920, 1_883_520, 21_600), "Long duration config changed.");
+}
+
+static void TestAdaptivePreferenceBoundaries()
+{
+    Assert(AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(4.999, AdaptivePreference.Cost) == AdaptivePreference.Speed,
+        "An interval below five seconds did not force Speed.");
+    Assert(AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(5, AdaptivePreference.Cost) == AdaptivePreference.Cost,
+        "The inclusive five-second boundary did not retain the base preference.");
+    Assert(AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(15, AdaptivePreference.Balanced) == AdaptivePreference.Balanced,
+        "The inclusive fifteen-second boundary did not retain the base preference.");
+    Assert(AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(15.001, AdaptivePreference.Speed) == AdaptivePreference.Balanced,
+        "Moderate idle time did not soften Speed to Balanced.");
+    Assert(AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(15.001, AdaptivePreference.Balanced) == AdaptivePreference.Cost,
+        "Moderate idle time did not shift Balanced to Cost.");
+    Assert(AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(30, AdaptivePreference.Speed) == AdaptivePreference.Balanced,
+        "The inclusive thirty-second boundary did not remain Balanced.");
+    Assert(AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(30.001, AdaptivePreference.Speed) == AdaptivePreference.Cost,
+        "An interval above thirty seconds did not force Cost.");
+}
+
+static void TestCurrentGroupIntervalResolution()
+{
+    var now = DateTimeOffset.Parse("2026-07-21T10:00:00Z");
+    var providers = JsonSerializer.Deserialize<ProviderStatus[]>("""
+        [
+          {"group_id":1,"platform":"openai","lastCallEndedAt":"2026-07-21T09:59:48Z"},
+          {"group_id":1,"platform":"openai","lastCallAt":"2026-07-21T09:59:53Z"},
+          {"group_id":2,"platform":"openai","lastCallEndedAt":"2026-07-21T09:59:59Z"}
+        ]
+        """)!;
+
+    var interval = AdaptiveSwitchDecisionEngine.ResolveCurrentIntervalSeconds(
+        providers,
+        currentGroupId: 1,
+        platform: "openai",
+        now: now);
+    Assert(interval == 7, "A newer call from an unrelated group replaced the current-group interval.");
+}
+
+static void TestMissingCallTimeRetainsBasePreference()
+{
+    var preference = AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(
+        currentIntervalSeconds: null,
+        basePreference: AdaptivePreference.Balanced);
+    Assert(preference == AdaptivePreference.Balanced, "A missing call timestamp fabricated an interval override.");
 }
 
 static void TestWarningProviderRemainsEligible()
