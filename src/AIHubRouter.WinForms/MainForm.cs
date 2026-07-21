@@ -24,6 +24,7 @@ internal sealed partial class MainForm : Form
     private MonitorSummary? _summary;
     private IReadOnlyList<GroupInfo> _groups = [];
     private IReadOnlyDictionary<long, double> _userRates = new Dictionary<long, double>();
+    private IReadOnlyList<AdaptiveCandidateRanking> _adaptiveRankings = [];
     private RouteCandidate? _bestCandidate;
 
     public MainForm()
@@ -311,11 +312,13 @@ internal sealed partial class MainForm : Form
         _summary = new MonitorSummary { Apis = result.Providers.ToList() };
         _groups = result.Groups;
         _userRates = result.UserGroupRates;
+        _adaptiveRankings = result.Decision.AdaptiveRankings;
         _bestCandidate = result.Decision.Target;
         ApplyKeys(result.Keys);
 
         var groupLookup = _groups.ToDictionary(group => group.Id);
         var candidateLookup = result.Evaluation.EligibleCandidates.ToDictionary(candidate => candidate.Group.Id);
+        var adaptiveRankingLookup = result.Decision.AdaptiveRankings.ToDictionary(ranking => ranking.GroupId);
         var minimumSuccessRate6h = (double)_minimumSuccessInput.Value / 100;
         var maximumStatusAge = TimeSpan.FromMinutes(15);
         var rows = result.Providers
@@ -326,6 +329,7 @@ internal sealed partial class MainForm : Form
                 var score = groupId is { } id && result.Evaluation.CandidateScores.TryGetValue(id, out var value)
                     ? value.ToString("0.###")
                     : "-";
+                var adaptiveRank = ResolveAdaptiveRank(groupId, adaptiveRankingLookup, out var adaptiveRankValue);
                 var decisionState = groupId is { } decisionGroupId && decisionGroupId == result.Decision.Target?.Group.Id ? "推荐"
                     : groupId is { } currentGroupId && currentGroupId == result.Decision.Current?.Group.Id ? "当前"
                     : groupId is { } baselineGroupId && baselineGroupId == result.Evaluation.Baseline?.Group.Id ? "最低价"
@@ -346,6 +350,8 @@ internal sealed partial class MainForm : Form
                     IsBest = groupId is { } targetGroupId && targetGroupId == result.Decision.Target?.Group.Id,
                     EffectiveRate = effective,
                     WeightedScore = score,
+                    AdaptiveRank = adaptiveRank,
+                    AdaptiveRankValue = adaptiveRankValue,
                     DecisionState = decisionState,
                     State = ProviderStatusPresentation.ResolveRoutingState(
                         provider,
@@ -357,7 +363,8 @@ internal sealed partial class MainForm : Form
                         maximumStatusAge: maximumStatusAge)
                 };
             })
-            .OrderByDescending(row => row.IsBest)
+            .OrderBy(row => row.AdaptiveRankValue)
+            .ThenByDescending(row => row.IsBest)
             .ThenBy(row => row.WeightedScore)
             .ToList();
         _providerGrid.DataSource = new BindingList<ProviderGridRow>(rows);
@@ -480,6 +487,26 @@ internal sealed partial class MainForm : Form
         _ => "经济"
     };
 
+    private static string ResolveAdaptiveRank(
+        long? groupId,
+        IReadOnlyDictionary<long, AdaptiveCandidateRanking> rankings,
+        out int rankValue)
+    {
+        rankValue = int.MaxValue;
+        if (groupId is not { } id || !rankings.TryGetValue(id, out var ranking))
+        {
+            return "-";
+        }
+
+        if (ranking.Rank is { } rank)
+        {
+            rankValue = rank;
+            return $"#{rank}";
+        }
+
+        return "不建议";
+    }
+
     private static string DecisionReasonText(RouteDecisionReason reason)
     {
         return reason switch
@@ -585,6 +612,7 @@ internal sealed partial class MainForm : Form
 
     private void RecalculateCandidate()
     {
+        _adaptiveRankings = [];
         if (_summary is null)
         {
             return;
@@ -596,19 +624,63 @@ internal sealed partial class MainForm : Form
             (double)_minimumSuccessInput.Value / 100,
             TimeSpan.FromMinutes(15));
 
+        var now = DateTimeOffset.UtcNow;
+        var selectedGroupIds = CurrentKeyRows()
+            .Where(row => row.Selected && row.GroupId is > 0)
+            .Where(row => row.Status.Equals("active", StringComparison.OrdinalIgnoreCase))
+            .Select(row => row.GroupId!.Value)
+            .Distinct()
+            .ToArray();
+        var observedGroupId = selectedGroupIds.Length == 1 ? selectedGroupIds[0] : (long?)null;
+        var previewCurrentGroupId = observedGroupId;
+        if (previewCurrentGroupId is null && selectedGroupIds.Length > 1)
+        {
+            var storageDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "AIHubRouter");
+            previewCurrentGroupId = new JsonRouteStateStore(storageDirectory).Load().CurrentGroupId;
+        }
+        var policy = new BalancedRoutingPolicy
+        {
+            Platform = platform,
+            Mode = CurrentRoutingMode(),
+            MinimumSuccessRate6h = criteria.MinimumSuccessRate6h,
+            MaximumStatusAge = criteria.MaximumStatusAge
+        };
+        var currentInterval = previewCurrentGroupId is { } groupId
+            ? AdaptiveSwitchDecisionEngine.ResolveCurrentIntervalSeconds(
+                _summary.Apis,
+                groupId,
+                platform,
+                now)
+            : null;
+        var effectivePreference = AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(
+            currentInterval,
+            AdaptiveSwitchDecisionEngine.ToPreference(policy.Mode));
+        var effectivePolicy = policy with
+        {
+            Mode = AdaptiveSwitchDecisionEngine.ToRoutingMode(effectivePreference)
+        };
         _lastEvaluation = RoutingEngine.Evaluate(
             _summary.Apis,
             _groups,
             _userRates,
-            new BalancedRoutingPolicy
-            {
-                Platform = platform,
-                Mode = CurrentRoutingMode(),
-                MinimumSuccessRate6h = criteria.MinimumSuccessRate6h,
-                MaximumStatusAge = criteria.MaximumStatusAge
-            },
-            DateTimeOffset.UtcNow);
+            effectivePolicy,
+            now);
         _bestCandidate = _lastEvaluation.Recommended;
+        if (previewCurrentGroupId is { } currentGroup &&
+            _lastEvaluation.EligibleCandidates.Any(candidate => candidate.Group.Id == currentGroup))
+        {
+            var preview = RouteDecisionEngine.Decide(
+                _lastEvaluation,
+                new RouteState { CurrentGroupId = currentGroup },
+                effectivePolicy,
+                new AdaptiveRoutingContext(CurrentRoutingMode(), CurrentDurationCategory(), currentInterval),
+                now,
+                observedGroupId);
+            _adaptiveRankings = preview.Decision.AdaptiveRankings;
+            _bestCandidate = preview.Decision.Target ?? _bestCandidate;
+        }
 
         ApplyProviders(criteria);
         _candidateLabel.Text = _bestCandidate is null
@@ -625,6 +697,7 @@ internal sealed partial class MainForm : Form
 
         var now = DateTimeOffset.UtcNow;
         var groups = _groups.ToDictionary(group => group.Id);
+        var adaptiveRankingLookup = _adaptiveRankings.ToDictionary(ranking => ranking.GroupId);
         var rows = _summary.Apis
             .Where(provider => provider.Platform.Equals(criteria.Platform, StringComparison.OrdinalIgnoreCase))
             .Select(provider =>
@@ -633,6 +706,7 @@ internal sealed partial class MainForm : Form
                 var overrideRate = 0d;
                 var hasOverride = provider.GroupId is { } id && _userRates.TryGetValue(id, out overrideRate);
                 var effectiveRate = hasOverride ? overrideRate : provider.PriceMultiplier;
+                var adaptiveRank = ResolveAdaptiveRank(provider.GroupId, adaptiveRankingLookup, out var adaptiveRankValue);
                 if (provider.GroupId is { } candidateGroup &&
                     _lastEvaluation?.EligibleCandidates.FirstOrDefault(candidate => candidate.Group.Id == candidateGroup) is { } evaluatedCandidate)
                 {
@@ -648,6 +722,8 @@ internal sealed partial class MainForm : Form
                         _lastEvaluation?.CandidateScores.TryGetValue(scoreGroupId, out var score) == true
                             ? score.ToString("0.###")
                             : "-",
+                    AdaptiveRank = adaptiveRank,
+                    AdaptiveRankValue = adaptiveRankValue,
                     DecisionState = provider.GroupId is { } recommendedGroupId &&
                         recommendedGroupId == _lastEvaluation?.Recommended?.Group.Id ? "推荐"
                         : provider.GroupId is { } baselineGroupId &&
@@ -663,7 +739,8 @@ internal sealed partial class MainForm : Form
                         maximumStatusAge: criteria.MaximumStatusAge)
                 };
             })
-            .OrderByDescending(row => row.IsBest)
+            .OrderBy(row => row.AdaptiveRankValue)
+            .ThenByDescending(row => row.IsBest)
             .ThenBy(row => row.Source.PriceMultiplier)
             .ThenByDescending(row => row.Source.SuccessRate6h ?? 0)
             .ToList();
@@ -733,6 +810,7 @@ internal sealed partial class MainForm : Form
 
         CaptureKeySelection();
         InvalidateRoutingService();
+        RecalculateCandidate();
         if (_persistCredentialsCheck.Checked)
         {
             SaveCurrentSettings(showStatus: false);

@@ -75,6 +75,12 @@ Speed minimizes completion time (then generation speed and net saving). This
 allows a candidate beyond the weighted winner to be selected when it is the
 one that satisfies the supplied algorithm.
 
+For a valid current route, the decision also exposes the ordered accepted
+candidates and the rejection reason for every evaluated alternative. WinForms
+uses that same result for the provider table's `算法排行` column (`#1`, `#2`,
+or `不建议`) and sorts suggestions by the algorithm rank. The legacy weighted
+score remains visible as `参考分` for diagnostics only.
+
 ## Pairwise Switch Engine
 
 `AdaptiveSwitchDecisionEngine` is a pure Core component. Its request contains

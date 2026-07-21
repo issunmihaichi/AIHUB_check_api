@@ -13,6 +13,8 @@ internal sealed class ProviderGridRow
     public string PublicRate => Source.PriceMultiplier.ToString("0.####");
     public string EffectiveRate { get; init; } = "-";
     public string WeightedScore { get; init; } = "-";
+    public string AdaptiveRank { get; init; } = "-";
+    public int AdaptiveRankValue { get; init; } = int.MaxValue;
     public string DecisionState { get; init; } = string.Empty;
     public string State { get; init; } = string.Empty;
     public string Success6h => Source.SuccessRate6h is { } rate ? $"{rate:P1}" : "-";

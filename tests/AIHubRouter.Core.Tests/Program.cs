@@ -49,6 +49,7 @@ var tests = new (string Name, Action Body)[]
     ("Adaptive rejection keeps current group", TestAdaptiveRejectionKeepsCurrentGroup),
     ("Adaptive acceptance updates selected Keys", TestAdaptiveAcceptanceUpdatesKeys),
     ("Adaptive traversal finds an accepted candidate beyond weighted winner", TestAdaptiveTraversalFindsAcceptedCandidateBeyondWeightedWinner),
+    ("Adaptive rankings follow accepted algorithm order", TestAdaptiveRankingsFollowAcceptedAlgorithmOrder),
     ("Initial and invalid routes recover immediately", TestAdaptiveRecoveryBypassesGuard),
     ("Missing latency ranks last", TestMissingLatencyRanksLast),
     ("Invalid measurements are excluded", TestInvalidMeasurementsAreExcluded),
@@ -826,6 +827,58 @@ static void TestAdaptiveTraversalFindsAcceptedCandidateBeyondWeightedWinner()
         "Adaptive traversal reported the weighted winner's price premium instead of the selected candidate's premium.");
     Assert(result.Decision.Reason == RouteDecisionReason.AdaptiveBalancedAccepted,
         "Adaptive traversal did not preserve the accepted decision reason.");
+}
+
+static void TestAdaptiveRankingsFollowAcceptedAlgorithmOrder()
+{
+    var now = DateTimeOffset.UtcNow;
+    var current = new RouteCandidate(
+        Provider(1, 0.10, true, 0.99, now, 1_000, outputTps: 100),
+        Group(1),
+        0.10,
+        false);
+    var acceptedByNetSaving = new RouteCandidate(
+        Provider(2, 0.05, true, 0.99, now, 1_000, outputTps: 100),
+        Group(2),
+        0.05,
+        false);
+    var bestNetSaving = new RouteCandidate(
+        Provider(3, 0.02, true, 0.99, now, 1_000, outputTps: 100),
+        Group(3),
+        0.02,
+        false);
+    var rejectedByTime = new RouteCandidate(
+        Provider(4, 0.01, true, 0.99, now, 1_000, outputTps: 1),
+        Group(4),
+        0.01,
+        false);
+    var evaluation = new RouteEvaluation(
+        acceptedByNetSaving,
+        acceptedByNetSaving,
+        [current, acceptedByNetSaving, bestNetSaving, rejectedByTime],
+        new Dictionary<long, double> { [1] = 0, [2] = 1, [3] = 0.5, [4] = 0.2 },
+        0.02,
+        0.80,
+        0.20);
+
+    var result = RouteDecisionEngine.Decide(
+        evaluation,
+        new RouteState { CurrentGroupId = 1 },
+        Policy(RoutingMode.Balanced),
+        new AdaptiveRoutingContext(RoutingMode.Balanced, TaskDurationCategory.Medium, 10),
+        now,
+        observedCurrentGroupId: 1);
+
+    var rankings = result.Decision.AdaptiveRankings;
+    Assert(rankings.Select(ranking => ranking.GroupId).Take(2).SequenceEqual([3L, 2L]),
+        "Adaptive rankings did not order accepted candidates by net saving.");
+    Assert(rankings.Single(ranking => ranking.GroupId == 3).Rank == 1 &&
+        rankings.Single(ranking => ranking.GroupId == 2).Rank == 2,
+        "Accepted adaptive candidates did not receive sequential ranks.");
+    Assert(!rankings.Single(ranking => ranking.GroupId == 4).Accepted &&
+        rankings.Single(ranking => ranking.GroupId == 4).Rank is null &&
+        rankings.Single(ranking => ranking.GroupId == 4).Reason == AdaptiveDecisionReason.BalancedGuardRejected,
+        "Rejected adaptive candidates incorrectly occupied a suggestion rank.");
 }
 
 static void TestAdaptiveRecoveryBypassesGuard()
