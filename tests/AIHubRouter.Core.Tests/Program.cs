@@ -502,6 +502,7 @@ static void TestRoutingPreferenceDefaults()
 {
     var settings = new PersistentAppSettings();
     Assert(settings.RoutingMode == RoutingMode.Economy, "New installs must preserve lowest-price routing.");
+    Assert(settings.DurationCategory == TaskDurationCategory.Medium, "New installs must default to Medium duration.");
     Assert(settings.AccountCacheSeconds == 300, "Account cache default changed.");
     Assert(settings.Theme == WinFormsTheme.System, "Theme must follow Windows by default.");
 }
@@ -520,12 +521,14 @@ static void TestRoutingPreferenceRoundtrip()
         store.Save(new PersistentAppSettings
         {
             RoutingMode = RoutingMode.Speed,
+            DurationCategory = TaskDurationCategory.Long,
             AccountCacheSeconds = 90,
             Theme = WinFormsTheme.Dark
         }, null);
 
         var loaded = store.Load().Settings;
         Assert(loaded.RoutingMode == RoutingMode.Speed, "Routing mode did not roundtrip.");
+        Assert(loaded.DurationCategory == TaskDurationCategory.Long, "Duration category did not roundtrip.");
         Assert(loaded.AccountCacheSeconds == 90, "Cache duration did not roundtrip.");
         Assert(loaded.Theme == WinFormsTheme.Dark, "Theme did not roundtrip.");
     }
@@ -1119,7 +1122,7 @@ static void TestAuditLogWritesValidJsonAndRotates()
         var entry = new RouteAuditEntry(
             DateTimeOffset.UtcNow,
             RoutingMode.Balanced,
-            RouteDecisionReason.FasterForWeightedTradeoff,
+            RouteDecisionReason.AdaptiveBalancedAccepted,
             1,
             2,
             false,
@@ -1127,7 +1130,18 @@ static void TestAuditLogWritesValidJsonAndRotates()
                 new RouteAuditCandidate(2, 0.02, 250, 0.4, true),
                 new RouteAuditCandidate(3, double.NaN, double.PositiveInfinity, double.NegativeInfinity, false)
             ],
-            [new RouteAuditKey(10, true, true, null)]);
+            [new RouteAuditKey(10, true, true, null)])
+        {
+            EffectivePreference = AdaptivePreference.Balanced,
+            DurationCategory = TaskDurationCategory.Medium,
+            CurrentIntervalSeconds = 10,
+            AdaptiveReason = AdaptiveDecisionReason.AcceptedBalanced,
+            PenaltyUsd = 0.03,
+            NetSavingUsd = 0.04,
+            OldCompletionSeconds = 4_000,
+            NewCompletionSeconds = 3_900,
+            DeltaSeconds = -100
+        };
         writer.Write(entry);
         writer.Write(entry);
 
@@ -1139,6 +1153,20 @@ static void TestAuditLogWritesValidJsonAndRotates()
             {
                 using var document = JsonDocument.Parse(line);
                 Assert(document.RootElement.TryGetProperty("timestamp", out _), "Audit JSON omitted timestamp.");
+                Assert(document.RootElement.TryGetProperty("effectivePreference", out _),
+                    "Audit JSON omitted the effective preference.");
+                Assert(document.RootElement.TryGetProperty("durationCategory", out _),
+                    "Audit JSON omitted the duration category.");
+                Assert(document.RootElement.TryGetProperty("currentIntervalSeconds", out _),
+                    "Audit JSON omitted the current interval.");
+                Assert(document.RootElement.TryGetProperty("adaptiveReason", out _),
+                    "Audit JSON omitted the adaptive reason.");
+                Assert(document.RootElement.TryGetProperty("penaltyUsd", out _) &&
+                    document.RootElement.TryGetProperty("netSavingUsd", out _) &&
+                    document.RootElement.TryGetProperty("oldCompletionSeconds", out _) &&
+                    document.RootElement.TryGetProperty("newCompletionSeconds", out _) &&
+                    document.RootElement.TryGetProperty("deltaSeconds", out _),
+                    "Audit JSON omitted adaptive numeric metrics.");
                 Assert(!line.Contains("password", StringComparison.OrdinalIgnoreCase) &&
                     !line.Contains("refresh", StringComparison.OrdinalIgnoreCase) &&
                     !line.Contains("token", StringComparison.OrdinalIgnoreCase) &&

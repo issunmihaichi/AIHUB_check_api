@@ -25,7 +25,18 @@ public sealed record RouteAuditEntry(
     long? TargetGroupId,
     bool DryRun,
     IReadOnlyList<RouteAuditCandidate> Candidates,
-    IReadOnlyList<RouteAuditKey> Keys);
+    IReadOnlyList<RouteAuditKey> Keys)
+{
+    public AdaptivePreference? EffectivePreference { get; init; }
+    public TaskDurationCategory? DurationCategory { get; init; }
+    public double? CurrentIntervalSeconds { get; init; }
+    public AdaptiveDecisionReason? AdaptiveReason { get; init; }
+    public double? PenaltyUsd { get; init; }
+    public double? NetSavingUsd { get; init; }
+    public double? OldCompletionSeconds { get; init; }
+    public double? NewCompletionSeconds { get; init; }
+    public double? DeltaSeconds { get; init; }
+}
 
 public sealed class AuditLogWriter
 {
@@ -57,6 +68,12 @@ public sealed class AuditLogWriter
         ArgumentNullException.ThrowIfNull(entry);
         var safeEntry = entry with
         {
+            CurrentIntervalSeconds = NormalizeNonNegative(entry.CurrentIntervalSeconds),
+            PenaltyUsd = NormalizeNonNegative(entry.PenaltyUsd),
+            NetSavingUsd = NormalizeFinite(entry.NetSavingUsd),
+            OldCompletionSeconds = NormalizeNonNegative(entry.OldCompletionSeconds),
+            NewCompletionSeconds = NormalizeNonNegative(entry.NewCompletionSeconds),
+            DeltaSeconds = NormalizeFinite(entry.DeltaSeconds),
             Candidates = entry.Candidates.Select(candidate => candidate with
             {
                 Multiplier = NormalizeFinite(candidate.Multiplier),
@@ -87,6 +104,12 @@ public sealed class AuditLogWriter
     }
 
     private static double NormalizeFinite(double value) => double.IsFinite(value) ? value : 0;
+
+    private static double? NormalizeFinite(double? value) =>
+        value is { } number && double.IsFinite(number) ? number : null;
+
+    private static double? NormalizeNonNegative(double? value) =>
+        value is { } number && double.IsFinite(number) && number >= 0 ? number : null;
 
     private static double? NormalizeLatency(double? value) =>
         value is { } latency && double.IsFinite(latency) && latency >= 0 ? latency : null;
