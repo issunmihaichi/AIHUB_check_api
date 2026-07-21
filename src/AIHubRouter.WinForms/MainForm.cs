@@ -332,7 +332,11 @@ internal sealed partial class MainForm : Form
                     EffectiveRate = effective,
                     WeightedScore = score,
                     DecisionState = decisionState,
-                    State = groupId is { } authorizedId && groupLookup.ContainsKey(authorizedId) ? "可路由" : "账号不可用"
+                    State = ProviderStatusPresentation.DecorateRoutableState(
+                        groupId is { } authorizedId && groupLookup.ContainsKey(authorizedId)
+                            ? "可路由"
+                            : "账号不可用",
+                        provider)
                 };
             })
             .OrderByDescending(row => row.IsBest)
@@ -430,6 +434,7 @@ internal sealed partial class MainForm : Form
             RouteDecisionReason.InitialRoute => "建立初始路由",
             RouteDecisionReason.CurrentRouteInvalid => "当前路由已不可用",
             RouteDecisionReason.AlreadyOptimal => "当前路由已是最优",
+            RouteDecisionReason.ScoreAdvantageTooSmall => "优势较小，保持当前路由",
             RouteDecisionReason.BetterPrice => "发现更低价格",
             RouteDecisionReason.FasterForWeightedTradeoff => "速度收益超过价格增幅",
             _ => "路由评估完成"
@@ -595,7 +600,7 @@ internal sealed partial class MainForm : Form
                         : provider.GroupId is { } baselineGroupId &&
                             baselineGroupId == _lastEvaluation?.Baseline?.Group.Id ? "最低价"
                         : string.Empty,
-                    State = state
+                    State = ProviderStatusPresentation.DecorateRoutableState(state, provider)
                 };
             })
             .OrderByDescending(row => row.IsBest)

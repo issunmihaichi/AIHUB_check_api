@@ -13,6 +13,7 @@ var tests = new (string Name, Action Body)[]
     ("Provider warnings deserialize", TestProviderWarningsDeserialize),
     ("Warning provider remains eligible", TestWarningProviderRemainsEligible),
     ("Latest unavailable state remains ineligible", TestLatestUnavailableStateRemainsIneligible),
+    ("Warning presentation excludes server message", TestWarningPresentationExcludesServerMessage),
     ("Stale status rejection", TestStaleStatusRejection),
     ("Routing preferences default to Win32-compatible values", TestRoutingPreferenceDefaults),
     ("Routing preferences roundtrip", TestRoutingPreferenceRoundtrip),
@@ -198,6 +199,22 @@ static void TestLatestUnavailableStateRemainsIneligible()
         now);
 
     Assert(result?.Group.Id == 2, "Latest unavailable state did not control eligibility.");
+}
+
+static void TestWarningPresentationExcludesServerMessage()
+{
+    const string sensitiveWarning = "synthetic-sensitive-warning";
+    var provider = new ProviderStatus
+    {
+        WarningReasons =
+        [
+            new ProviderWarningReason { Type = "latency_spike", Message = sensitiveWarning }
+        ]
+    };
+
+    var state = ProviderStatusPresentation.DecorateRoutableState("可路由", provider);
+    Assert(state == "可路由（警告）", "Warning state was not decorated safely.");
+    Assert(!state.Contains(sensitiveWarning, StringComparison.Ordinal), "Warning message leaked into presentation state.");
 }
 
 static void TestStaleStatusRejection()
