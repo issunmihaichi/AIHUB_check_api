@@ -633,12 +633,14 @@ internal sealed partial class MainForm : Form
             .ToArray();
         var observedGroupId = selectedGroupIds.Length == 1 ? selectedGroupIds[0] : (long?)null;
         var previewCurrentGroupId = observedGroupId;
+        var previewState = new RouteState();
         if (previewCurrentGroupId is null && selectedGroupIds.Length > 1)
         {
             var storageDirectory = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 "AIHubRouter");
-            previewCurrentGroupId = new JsonRouteStateStore(storageDirectory).Load().CurrentGroupId;
+            previewState = new JsonRouteStateStore(storageDirectory).Load();
+            previewCurrentGroupId = previewState.CurrentGroupId;
         }
         var policy = new BalancedRoutingPolicy
         {
@@ -647,40 +649,18 @@ internal sealed partial class MainForm : Form
             MinimumSuccessRate6h = criteria.MinimumSuccessRate6h,
             MaximumStatusAge = criteria.MaximumStatusAge
         };
-        var currentInterval = previewCurrentGroupId is { } groupId
-            ? AdaptiveSwitchDecisionEngine.ResolveCurrentIntervalSeconds(
-                _summary.Apis,
-                groupId,
-                platform,
-                now)
-            : null;
-        var effectivePreference = AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(
-            currentInterval,
-            AdaptiveSwitchDecisionEngine.ToPreference(policy.Mode));
-        var effectivePolicy = policy with
-        {
-            Mode = AdaptiveSwitchDecisionEngine.ToRoutingMode(effectivePreference)
-        };
-        _lastEvaluation = RoutingEngine.Evaluate(
+        var snapshot = RouteDecisionCoordinator.Evaluate(
             _summary.Apis,
             _groups,
             _userRates,
-            effectivePolicy,
-            now);
-        _bestCandidate = _lastEvaluation.Recommended;
-        if (previewCurrentGroupId is { } currentGroup &&
-            _lastEvaluation.EligibleCandidates.Any(candidate => candidate.Group.Id == currentGroup))
-        {
-            var preview = RouteDecisionEngine.Decide(
-                _lastEvaluation,
-                new RouteState { CurrentGroupId = currentGroup },
-                effectivePolicy,
-                new AdaptiveRoutingContext(CurrentRoutingMode(), CurrentDurationCategory(), currentInterval),
-                now,
-                observedGroupId);
-            _adaptiveRankings = preview.Decision.AdaptiveRankings;
-            _bestCandidate = preview.Decision.Target ?? _bestCandidate;
-        }
+            policy,
+            CurrentDurationCategory(),
+            previewState with { CurrentGroupId = previewCurrentGroupId },
+            now,
+            observedGroupId);
+        _lastEvaluation = snapshot.Evaluation;
+        _adaptiveRankings = snapshot.Result.Decision.AdaptiveRankings;
+        _bestCandidate = snapshot.Result.Decision.Target;
 
         ApplyProviders(criteria);
         _candidateLabel.Text = _bestCandidate is null

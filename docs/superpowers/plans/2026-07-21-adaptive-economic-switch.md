@@ -97,15 +97,15 @@ public static class AdaptiveRoutingConstants
     public const double InputPricePerMillion = 5.0;
     public const double OutputPricePerMillion = 30.0;
     public const double PenaltyTokens = 300_000;
-    public const double PlanningTokensPerSecond = 21.8;
+    public const double PlanningTokensPerSecond = 43.6;
     public const double MinimumUsefulRemainingTokens = 1_000;
     public const double MaximumCostCompletionSeconds = 24 * 60 * 60;
 
     public static DurationConfiguration Duration(TaskDurationCategory category) => category switch
     {
-        TaskDurationCategory.Short => new(0, 78_480, 3_600),
-        TaskDurationCategory.Medium => new(78_480, 313_920, 7_200),
-        TaskDurationCategory.Long => new(313_920, 1_883_520, 21_600),
+        TaskDurationCategory.Short => new(0, 156_960, 3_600),
+        TaskDurationCategory.Medium => new(156_960, 627_840, 7_200),
+        TaskDurationCategory.Long => new(627_840, 3_767_040, 21_600),
         _ => throw new ArgumentOutOfRangeException(nameof(category))
     };
 }
