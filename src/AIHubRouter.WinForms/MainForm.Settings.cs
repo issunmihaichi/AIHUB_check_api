@@ -24,7 +24,9 @@ internal sealed partial class MainForm
             SmoothRendering = _verticalSyncCheck.Checked,
             Theme = _themePreference,
             KeySelectionInitialized = _keySelectionInitialized,
-            SelectedKeyIds = _savedSelectedKeyIds.Order().ToArray()
+            SelectedKeyIds = _savedSelectedKeyIds.Order().ToArray(),
+            BlockedGroupIds = _providerBlocklist.BlockedGroupIds.Order().ToArray(),
+            BlockedNodePatterns = _providerBlocklist.BlockedNodePatterns.ToArray()
         };
     }
 
@@ -205,6 +207,7 @@ internal sealed partial class MainForm
             _persistCredentialsCheck.Checked = settings.PersistCredentials;
             _keySelectionInitialized = settings.KeySelectionInitialized;
             _savedSelectedKeyIds = settings.SelectedKeyIds.ToHashSet();
+            _providerBlocklist = new ProviderBlocklist(settings.BlockedGroupIds, settings.BlockedNodePatterns);
 
             if (settings.PersistCredentials && snapshot.Credentials is { } credentials)
             {

@@ -27,6 +27,7 @@ internal sealed partial class MainForm
     private readonly Button _refreshButton = new() { Text = "刷新数据", AutoSize = true };
     private readonly Button _simulateButton = new() { Text = "模拟", AutoSize = true };
     private readonly Button _routeNowButton = new() { Text = "立即路由", AutoSize = true };
+    private readonly Button _manageBlocklistButton = new() { Text = "黑名单...", AutoSize = true };
     private readonly ComboBox _platformCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 110 };
     private readonly ComboBox _routingModeCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 92 };
     private readonly NumericUpDown _balancedCountdownInput = new()
@@ -88,6 +89,8 @@ internal sealed partial class MainForm
     private readonly CheckBox _verticalSyncCheck = new() { Text = "垂直同步（双缓冲）", AutoSize = true, Checked = true };
     private readonly BufferedDataGridView _providerGrid = CreateGrid();
     private readonly BufferedDataGridView _keyGrid = CreateGrid();
+    private readonly ContextMenuStrip _providerContextMenu = new();
+    private readonly ToolStripMenuItem _toggleGroupBlocklistMenuItem = new();
     private readonly ToolTip _toolTip = new() { AutoPopDelay = 12000, InitialDelay = 350, ReshowDelay = 100 };
     private readonly StatusStrip _statusStrip = new();
     private readonly ToolStripStatusLabel _statusLabel = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
@@ -306,6 +309,7 @@ internal sealed partial class MainForm
         panel.Controls.Add(_balancedExpectedOutputInput);
         panel.Controls.Add(CreateToolbarLabel("主题"));
         panel.Controls.Add(_themeCombo);
+        panel.Controls.Add(_manageBlocklistButton);
         panel.Controls.Add(_refreshButton);
         panel.Controls.Add(_simulateButton);
         panel.Controls.Add(_routeNowButton);
@@ -367,6 +371,12 @@ internal sealed partial class MainForm
 
     private void ConfigureProviderGrid()
     {
+        _providerContextMenu.Items.Add(_toggleGroupBlocklistMenuItem);
+        _providerContextMenu.Opening += HandleProviderContextMenuOpening;
+        _toggleGroupBlocklistMenuItem.Click += (_, _) => ToggleCurrentGroupBlocklist();
+        _providerGrid.ContextMenuStrip = _providerContextMenu;
+        _providerGrid.MouseDown += HandleProviderGridMouseDown;
+        _providerGrid.CellMouseDown += HandleProviderGridCellMouseDown;
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "推荐", DataPropertyName = "Best", Width = 58 });
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "分组", DataPropertyName = "GroupId", Width = 62 });
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "方案", DataPropertyName = "Plan", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = 150 });
@@ -380,6 +390,7 @@ internal sealed partial class MainForm
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "6h 可用率", DataPropertyName = "Success6h", Width = 92 });
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "首 Token", DataPropertyName = "FirstToken", Width = 88 });
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "检测时间", DataPropertyName = "CheckedAt", Width = 118 });
+        _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "黑名单", DataPropertyName = "BlockStatus", Width = 90 });
         _providerGrid.CellFormatting += (_, eventArgs) =>
         {
             if (_providerGrid.Rows[eventArgs.RowIndex].DataBoundItem is ProviderGridRow { IsBest: true })

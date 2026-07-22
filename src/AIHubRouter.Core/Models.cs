@@ -149,7 +149,8 @@ public sealed class PaginatedResponse<T>
 public sealed record RoutingCriteria(
     string Platform,
     double MinimumSuccessRate6h,
-    TimeSpan MaximumStatusAge);
+    TimeSpan MaximumStatusAge,
+    ProviderBlocklist? Blocklist = null);
 
 public sealed record RouteCandidate(
     ProviderStatus Provider,
@@ -196,6 +197,7 @@ public sealed record BalancedRoutingPolicy
     public RoutingMode Mode { get; init; } = RoutingMode.Economy;
     public double MinimumSuccessRate6h { get; init; } = 0;
     public TimeSpan MaximumStatusAge { get; init; } = TimeSpan.FromMinutes(15);
+    public ProviderBlocklist Blocklist { get; init; } = ProviderBlocklist.Empty;
 
     public double PriceWeight => Mode switch
     {
