@@ -15,6 +15,6 @@ internal static class TestCatalog
             }
         }
 
-        return Array.AsReadOnly(tests);
+        return Array.AsReadOnly(tests.ToArray());
     }
 }
