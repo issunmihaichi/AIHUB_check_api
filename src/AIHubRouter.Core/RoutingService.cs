@@ -27,6 +27,7 @@ public sealed record RoutingCycleResult(
 {
     public int ChangedKeyCount => KeyResults.Count(result => result.Changed && result.Success);
     public int FailedKeyCount => KeyResults.Count(result => !result.Success);
+    public RouteState NextRouteState { get; init; } = new();
 }
 
 public sealed class RoutingService : IDisposable
@@ -195,9 +196,10 @@ public sealed class RoutingService : IDisposable
             }
         }
 
+        var nextState = decisionResult.NextState;
         if (!dryRun)
         {
-            var nextState = keyResults.Any(result => !result.Success)
+            nextState = keyResults.Any(result => !result.Success)
                 ? decisionResult.NextState with { CurrentGroupId = null }
                 : decisionResult.NextState;
             _stateStore.Save(nextState);
@@ -213,7 +215,10 @@ public sealed class RoutingService : IDisposable
             selectedKeys.Select(key => key.Id).ToArray(),
             keyResults,
             dryRun,
-            _utcNow());
+            _utcNow())
+        {
+            NextRouteState = nextState
+        };
     }
 
     private IReadOnlyList<ApiKeyInfo> ResolveSelectedKeys(IReadOnlyList<ApiKeyInfo> keys)

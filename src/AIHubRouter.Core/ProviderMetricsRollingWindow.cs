@@ -95,6 +95,16 @@ public sealed class ProviderMetricsRollingWindow
 
     private ProviderStatus AggregateProvider(ProviderStatus latest, IReadOnlyList<ProviderSample> samples)
     {
+        var latencySamples = samples
+            .Select(sample => sample.Provider.FirstTokenLatencyMs)
+            .Where(value => value is { } latency && IsNonNegativeFinite(latency))
+            .Select(value => value!.Value)
+            .ToArray();
+        var outputSpeedSamples = samples
+            .Select(sample => sample.Provider.OutputTokensPerSecond)
+            .Where(value => value is { } speed && IsPositiveFinite(speed))
+            .Select(value => value!.Value)
+            .ToArray();
         var successRates = latest.SuccessRates is { } rates
             ? new Dictionary<string, double>(rates, StringComparer.OrdinalIgnoreCase)
             : new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
@@ -132,6 +142,9 @@ public sealed class ProviderMetricsRollingWindow
                 .Select(sample => sample.Provider.OutputTokensPerSecond)
                 .Where(value => value is { } speed && IsPositiveFinite(speed))
                 .Select(value => value!.Value)),
+            FirstTokenLatencyP90Ms = Percentile(latencySamples, 0.90),
+            OutputTokensPerSecondP25 = Percentile(outputSpeedSamples, 0.25),
+            PerformanceSampleCount = Math.Min(latencySamples.Length, outputSpeedSamples.Length),
             SuccessRates = successRates,
             ErrorMessage = latest.ErrorMessage,
             WarningReasons = latest.WarningReasons?.Select(reason => new ProviderWarningReason
@@ -199,6 +212,18 @@ public sealed class ProviderMetricsRollingWindow
 
         var lower = ordered[upper - 1];
         return lower + (ordered[upper] - lower) / 2;
+    }
+
+    private static double? Percentile(IEnumerable<double> values, double percentile)
+    {
+        var ordered = values.Where(double.IsFinite).OrderBy(value => value).ToArray();
+        if (ordered.Length == 0 || !double.IsFinite(percentile) || percentile is < 0 or > 1)
+        {
+            return null;
+        }
+
+        var index = Math.Clamp((int)Math.Ceiling(percentile * ordered.Length) - 1, 0, ordered.Length - 1);
+        return ordered[index];
     }
 
     private static DateTimeOffset? MedianTimestamp(IEnumerable<DateTimeOffset?> values)

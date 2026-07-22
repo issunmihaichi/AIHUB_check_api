@@ -109,4 +109,27 @@ internal static partial class CoreTestCases
             "Duplicate-group TTFT was not aggregated by median.");
     }
 
+    internal static void TestRollingProviderMetricsExposeConservativePerformance()
+    {
+        var now = new DateTimeOffset(2026, 7, 22, 9, 0, 0, TimeSpan.Zero);
+        var window = new ProviderMetricsRollingWindow();
+        window.Observe(now.AddMinutes(-2),
+            [Provider(1, 0.01, true, 1, now.AddMinutes(-2), latency: 100, outputTps: 10)],
+            new Dictionary<long, double>());
+        window.Observe(now.AddMinutes(-1),
+            [Provider(1, 0.01, true, 1, now.AddMinutes(-1), latency: 300, outputTps: 30)],
+            new Dictionary<long, double>());
+        var snapshot = window.Observe(now,
+            [Provider(1, 0.01, true, 1, now, latency: 500, outputTps: 50)],
+            new Dictionary<long, double>());
+
+        var provider = snapshot.Providers.Single();
+        Assert(provider.PerformanceSampleCount == 3,
+            "Rolling metrics did not expose the performance sample count.");
+        Assert(provider.FirstTokenLatencyP90Ms == 500,
+            "Rolling metrics did not use the conservative P90 first-token latency.");
+        Assert(provider.OutputTokensPerSecondP25 == 10,
+            "Rolling metrics did not use the conservative P25 output speed.");
+    }
+
 }

@@ -191,6 +191,63 @@ internal static partial class CoreTestCases
             "A zero Balanced countdown did not fall back to strict Economy.");
     }
 
+    internal static void TestBalancedDeadlineUsesConservativePerformance()
+    {
+        var candidate = new RouteCandidate(
+            new ProviderStatus
+            {
+                Id = "provider-1",
+                GroupId = 1,
+                Platform = "openai",
+                FirstTokenLatencyMs = 100,
+                OutputTokensPerSecond = 100,
+                FirstTokenLatencyP90Ms = 2_000,
+                OutputTokensPerSecondP25 = 10,
+                PerformanceSampleCount = 20
+            },
+            Group(1),
+            0.01,
+            false);
+
+        var completion = BalancedDeadlineEngine.CalculateCompletionSeconds(candidate, 100);
+        Assert(Math.Abs(completion - 12) < 1e-12,
+            "Balanced deadline did not use conservative performance percentiles.");
+    }
+
+    internal static void TestBalancedDeadlineInvalidCurrentIsForcedRecovery()
+    {
+        var now = DateTimeOffset.Parse("2026-07-22T12:00:00Z");
+        var evaluation = RoutingEngine.Evaluate(
+            [Provider(2, 0.02, true, 1, now, 1_000, outputTps: 50)],
+            [Group(2)],
+            new Dictionary<long, double>(),
+            Policy(RoutingMode.Balanced),
+            now);
+
+        var result = RouteDecisionEngine.Decide(
+            evaluation,
+            new RouteState
+            {
+                CurrentGroupId = 1,
+                LastPolicySwitchAt = now,
+                CompletedPolicyEvaluationsSinceLastSwitch = 0
+            },
+            Policy(RoutingMode.Balanced),
+            new AdaptiveRoutingContext(
+                RoutingMode.Balanced,
+                TaskDurationCategory.Medium,
+                CurrentIntervalSeconds: 1,
+                BalancedRemainingSeconds: 60,
+                BalancedExpectedOutputTokens: 100),
+            now,
+            observedCurrentGroupId: 1);
+
+        Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 2 &&
+            result.Decision.Reason == RouteDecisionReason.CurrentRouteInvalid &&
+            result.Decision.SwitchClass == RouteSwitchClass.ForcedRecovery,
+            "Balanced routing misclassified an unavailable current group as a cold start.");
+    }
+
     internal static void TestBalancedModeBuysLatency()
     {
         var now = DateTimeOffset.UtcNow;

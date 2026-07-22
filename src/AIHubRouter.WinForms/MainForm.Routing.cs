@@ -265,7 +265,12 @@ internal sealed partial class MainForm
                     candidate.EffectiveMultiplier,
                     candidate.Provider.FirstTokenLatencyMs,
                     result.Evaluation.CandidateScores.TryGetValue(candidate.Group.Id, out var score) ? score : 0,
-                    candidate.Group.Id == result.Decision.Target?.Group.Id)).ToArray(),
+                    candidate.Group.Id == result.Decision.Target?.Group.Id)
+                {
+                    LatencyP90Ms = candidate.Provider.FirstTokenLatencyP90Ms,
+                    OutputRateP25 = candidate.Provider.OutputTokensPerSecondP25,
+                    PerformanceSampleCount = candidate.Provider.PerformanceSampleCount
+                }).ToArray(),
                 result.KeyResults.Select(key => new RouteAuditKey(
                     key.KeyId,
                     key.Changed,
@@ -285,7 +290,13 @@ internal sealed partial class MainForm
                 BalancedOutputTokens = balanced?.OutputTokens,
                 BalancedCurrentCompletionSeconds = balanced?.CurrentCompletionSeconds,
                 BalancedTargetCompletionSeconds = balanced?.TargetCompletionSeconds,
-                BalancedTargetCostUsd = balanced?.TargetCostUsd
+                BalancedTargetCostUsd = balanced?.TargetCostUsd,
+                SwitchClass = result.Decision.SwitchClass,
+                LastPolicySwitchAt = result.NextRouteState.LastPolicySwitchAt,
+                CompletedPolicyEvaluationsSinceLastSwitch =
+                    result.NextRouteState.CompletedPolicyEvaluationsSinceLastSwitch,
+                PendingPolicyTargetGroupId = result.NextRouteState.PendingPolicyTargetGroupId,
+                PendingPolicyTargetObservations = result.NextRouteState.PendingPolicyTargetObservations
             });
         }
         catch

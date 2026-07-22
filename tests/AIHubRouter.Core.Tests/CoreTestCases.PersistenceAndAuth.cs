@@ -41,7 +41,12 @@ internal static partial class CoreTestCases
                 2,
                 false,
                 [
-                    new RouteAuditCandidate(2, 0.02, 250, 0.4, true),
+                    new RouteAuditCandidate(2, 0.02, 250, 0.4, true)
+                    {
+                        LatencyP90Ms = 300,
+                        OutputRateP25 = 20,
+                        PerformanceSampleCount = 20
+                    },
                     new RouteAuditCandidate(3, double.NaN, double.PositiveInfinity, double.NegativeInfinity, false)
                 ],
                 [new RouteAuditKey(10, true, true, null)])
@@ -54,7 +59,11 @@ internal static partial class CoreTestCases
                 NetSavingUsd = 0.04,
                 OldCompletionSeconds = 4_000,
                 NewCompletionSeconds = 3_900,
-                DeltaSeconds = -100
+                DeltaSeconds = -100,
+                SwitchClass = RouteSwitchClass.Policy,
+                CompletedPolicyEvaluationsSinceLastSwitch = 6,
+                PendingPolicyTargetGroupId = 2,
+                PendingPolicyTargetObservations = 2
             };
             writer.Write(entry);
             writer.Write(entry);
@@ -75,6 +84,16 @@ internal static partial class CoreTestCases
                         "Audit JSON omitted the current interval.");
                     Assert(document.RootElement.TryGetProperty("adaptiveReason", out _),
                         "Audit JSON omitted the adaptive reason.");
+                    Assert(document.RootElement.TryGetProperty("switchClass", out _) &&
+                        document.RootElement.TryGetProperty("completedPolicyEvaluationsSinceLastSwitch", out _) &&
+                        document.RootElement.TryGetProperty("pendingPolicyTargetGroupId", out _) &&
+                        document.RootElement.TryGetProperty("pendingPolicyTargetObservations", out _),
+                        "Audit JSON omitted policy-switch classification or hysteresis state.");
+                    var candidate = document.RootElement.GetProperty("candidates")[0];
+                    Assert(candidate.TryGetProperty("latencyP90Ms", out _) &&
+                        candidate.TryGetProperty("outputRateP25", out _) &&
+                        candidate.TryGetProperty("performanceSampleCount", out _),
+                        "Audit JSON omitted conservative candidate performance metrics.");
                     Assert(document.RootElement.TryGetProperty("penaltyUsd", out _) &&
                         document.RootElement.TryGetProperty("netSavingUsd", out _) &&
                         document.RootElement.TryGetProperty("oldCompletionSeconds", out _) &&
