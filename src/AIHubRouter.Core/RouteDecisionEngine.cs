@@ -32,9 +32,16 @@ public static class RouteDecisionEngine
         ArgumentNullException.ThrowIfNull(context);
         policy.Validate();
 
-        var effectivePreference = AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(
-            context.CurrentIntervalSeconds,
-            AdaptiveSwitchDecisionEngine.ToPreference(context.BaseMode));
+        var basePreference = AdaptiveSwitchDecisionEngine.ToPreference(context.BaseMode);
+        var effectivePreference = context.BaseMode switch
+        {
+            RoutingMode.Economy => AdaptivePreference.Cost,
+            RoutingMode.Balanced when context.BalancedRemainingSeconds is { } balancedRemaining =>
+                balancedRemaining <= 0 ? AdaptivePreference.Cost : AdaptivePreference.Balanced,
+            _ => AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(
+                context.CurrentIntervalSeconds,
+                basePreference)
+        };
         var currentGroupId = observedCurrentGroupId ?? state.CurrentGroupId;
         var current = evaluation.EligibleCandidates.FirstOrDefault(
             candidate => candidate.Group.Id == currentGroupId);
@@ -50,6 +57,38 @@ public static class RouteDecisionEngine
                 effectivePreference,
                 adaptiveDecision: null,
                 "没有符合条件的路由");
+        }
+
+        if (context.BaseMode == RoutingMode.Balanced &&
+            context.BalancedRemainingSeconds is { } remainingSeconds)
+        {
+            if (remainingSeconds <= 0)
+            {
+                return DecideBalancedCountdownExpired(
+                    evaluation,
+                    current,
+                    target,
+                    state,
+                    context,
+                    now);
+            }
+
+            var deadlineDecision = BalancedDeadlineEngine.Decide(new BalancedDeadlineRequest(
+                current,
+                evaluation.EligibleCandidates,
+                BalancedDeadlineEngine.EstimateOutputTokens(remainingSeconds),
+                context.CurrentIntervalSeconds,
+                DeadlineSoftSeconds: context.BalancedDeadlineSoftSeconds ??
+                    BalancedDeadlineEngine.DefaultSoftDeadlineSeconds));
+            return ApplyBalancedDeadlineDecision(
+                evaluation,
+                state,
+                context,
+                effectivePreference,
+                current,
+                target,
+                deadlineDecision,
+                now);
         }
 
         var premium = CalculatePremium(evaluation.MinimumMultiplier, target.EffectiveMultiplier);
@@ -71,6 +110,18 @@ public static class RouteDecisionEngine
                 effectivePreference,
                 adaptiveDecision: null,
                 "当前路由已不可用");
+        }
+
+        if (effectivePreference == AdaptivePreference.Cost)
+        {
+            return DecideStrictEconomy(
+                evaluation,
+                state,
+                context,
+                current,
+                target,
+                effectivePreference,
+                now);
         }
 
         var search = SelectAdaptiveTarget(
@@ -141,13 +192,102 @@ public static class RouteDecisionEngine
             rankings);
     }
 
+    private static RouteDecisionResult DecideStrictEconomy(
+        RouteEvaluation evaluation,
+        RouteState state,
+        AdaptiveRoutingContext context,
+        RouteCandidate? current,
+        RouteCandidate target,
+        AdaptivePreference effectivePreference,
+        DateTimeOffset now)
+    {
+        var premium = CalculatePremium(evaluation.MinimumMultiplier, target.EffectiveMultiplier);
+        var same = current is not null && current.Group.Id == target.Group.Id;
+        var result = same
+            ? Result(current, current, false, RouteDecisionReason.AlreadyOptimal,
+                new RouteState { CurrentGroupId = current!.Group.Id }, premium, 0, now)
+            : Switched(current, target, RouteDecisionReason.AdaptiveCostAccepted,
+                state, premium, CalculateLatencyImprovement(
+                    current?.Provider.FirstTokenLatencyMs,
+                    target.Provider.FirstTokenLatencyMs), now);
+        return Enrich(
+            result,
+            context,
+            effectivePreference,
+            adaptiveDecision: null,
+            same ? "Economy kept the current lowest-cost route." : "Economy selected the strict lowest-cost route.");
+    }
+
+    private static RouteDecisionResult DecideBalancedCountdownExpired(
+        RouteEvaluation evaluation,
+        RouteCandidate? current,
+        RouteCandidate target,
+        RouteState state,
+        AdaptiveRoutingContext context,
+        DateTimeOffset now)
+    {
+        var same = current is not null && current.Group.Id == target.Group.Id;
+        var premium = CalculatePremium(evaluation.MinimumMultiplier, target.EffectiveMultiplier);
+        var result = same
+            ? Result(current, current, false, RouteDecisionReason.BalancedCountdownExpired,
+                new RouteState { CurrentGroupId = current!.Group.Id }, premium, 0, now)
+            : Switched(current, target, RouteDecisionReason.BalancedCountdownExpired,
+                state, premium, CalculateLatencyImprovement(
+                    current?.Provider.FirstTokenLatencyMs,
+                    target.Provider.FirstTokenLatencyMs), now);
+        return Enrich(
+            result,
+            context,
+            AdaptivePreference.Cost,
+            adaptiveDecision: null,
+            "Balanced countdown expired; Economy selected the strict lowest-cost route.");
+    }
+
+    private static RouteDecisionResult ApplyBalancedDeadlineDecision(
+        RouteEvaluation evaluation,
+        RouteState state,
+        AdaptiveRoutingContext context,
+        AdaptivePreference effectivePreference,
+        RouteCandidate? current,
+        RouteCandidate fallbackTarget,
+        BalancedDeadlineDecision deadlineDecision,
+        DateTimeOffset now)
+    {
+        var target = deadlineDecision.Target ?? current ?? fallbackTarget;
+        var premium = CalculatePremium(evaluation.MinimumMultiplier, target.EffectiveMultiplier);
+        var reason = deadlineDecision.Reason switch
+        {
+            BalancedDeadlineDecisionReason.ColdStart => RouteDecisionReason.BalancedDeadlineColdStart,
+            BalancedDeadlineDecisionReason.CurrentWithinDeadline =>
+                RouteDecisionReason.BalancedDeadlineCurrentWithinDeadline,
+            BalancedDeadlineDecisionReason.SwitchedAfterDeadline => RouteDecisionReason.BalancedDeadlineSwitched,
+            _ => RouteDecisionReason.BalancedDeadlineNoFeasibleCandidate
+        };
+        var same = current is not null && current.Group.Id == target.Group.Id;
+        var shouldSwitch = deadlineDecision.ShouldSwitch && !same;
+        var result = shouldSwitch
+            ? Switched(current, target, reason, state, premium, CalculateLatencyImprovement(
+                current?.Provider.FirstTokenLatencyMs,
+                target.Provider.FirstTokenLatencyMs), now)
+            : Result(current, current ?? target, false, reason,
+                new RouteState { CurrentGroupId = target.Group.Id }, premium, 0, now);
+        return Enrich(
+            result,
+            context,
+            effectivePreference,
+            adaptiveDecision: null,
+            deadlineDecision.Detail,
+            deadlineDecision: deadlineDecision);
+    }
+
     private static RouteDecisionResult Enrich(
         RouteDecisionResult result,
         AdaptiveRoutingContext context,
         AdaptivePreference effectivePreference,
         AdaptiveSwitchDecision? adaptiveDecision,
         string detail,
-        IReadOnlyList<AdaptiveCandidateRanking>? adaptiveRankings = null) =>
+        IReadOnlyList<AdaptiveCandidateRanking>? adaptiveRankings = null,
+        BalancedDeadlineDecision? deadlineDecision = null) =>
         result with
         {
             Decision = result.Decision with
@@ -156,6 +296,7 @@ public static class RouteDecisionEngine
                 DurationCategory = context.DurationCategory,
                 CurrentIntervalSeconds = context.CurrentIntervalSeconds,
                 AdaptiveDecision = adaptiveDecision,
+                BalancedDeadlineDecision = deadlineDecision,
                 AdaptiveRankings = adaptiveRankings ?? result.Decision.AdaptiveRankings,
                 Detail = detail
             }
@@ -236,6 +377,7 @@ public static class RouteDecisionEngine
 
         return search.Evaluated
             .Select(selection => new AdaptiveCandidateRanking(
+                selection.Candidate.Provider.Id,
                 selection.Candidate.Group.Id,
                 rankByGroup.TryGetValue(selection.Candidate.Group.Id, out var rank) ? rank : null,
                 selection.Decision.ShouldSwitch,

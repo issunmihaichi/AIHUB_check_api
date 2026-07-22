@@ -5,6 +5,7 @@ namespace AIHubRouter.WinForms;
 internal sealed class ProviderGridRow
 {
     public required ProviderStatus Source { get; init; }
+    public bool IsRoutable { get; init; }
     public bool IsBest { get; init; }
     public string Best => IsBest ? "最低" : string.Empty;
     public long? GroupId => Source.GroupId;
@@ -13,6 +14,7 @@ internal sealed class ProviderGridRow
     public string PublicRate => Source.PriceMultiplier.ToString("0.####");
     public string EffectiveRate { get; init; } = "-";
     public string WeightedScore { get; init; } = "-";
+    public double WeightedScoreValue { get; init; } = double.NegativeInfinity;
     public string AdaptiveRank { get; init; } = "-";
     public int AdaptiveRankValue { get; init; } = int.MaxValue;
     public string DecisionState { get; init; } = string.Empty;

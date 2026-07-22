@@ -36,6 +36,11 @@ public sealed record RouteAuditEntry(
     public double? OldCompletionSeconds { get; init; }
     public double? NewCompletionSeconds { get; init; }
     public double? DeltaSeconds { get; init; }
+    public BalancedDeadlineDecisionReason? BalancedDeadlineReason { get; init; }
+    public double? BalancedOutputTokens { get; init; }
+    public double? BalancedCurrentCompletionSeconds { get; init; }
+    public double? BalancedTargetCompletionSeconds { get; init; }
+    public double? BalancedTargetCostUsd { get; init; }
 }
 
 public sealed class AuditLogWriter
@@ -74,6 +79,10 @@ public sealed class AuditLogWriter
             OldCompletionSeconds = NormalizeNonNegative(entry.OldCompletionSeconds),
             NewCompletionSeconds = NormalizeNonNegative(entry.NewCompletionSeconds),
             DeltaSeconds = NormalizeFinite(entry.DeltaSeconds),
+            BalancedOutputTokens = NormalizeNonNegative(entry.BalancedOutputTokens),
+            BalancedCurrentCompletionSeconds = NormalizeNonNegative(entry.BalancedCurrentCompletionSeconds),
+            BalancedTargetCompletionSeconds = NormalizeNonNegative(entry.BalancedTargetCompletionSeconds),
+            BalancedTargetCostUsd = NormalizeNonNegative(entry.BalancedTargetCostUsd),
             Candidates = entry.Candidates.Select(candidate => candidate with
             {
                 Multiplier = NormalizeFinite(candidate.Multiplier),

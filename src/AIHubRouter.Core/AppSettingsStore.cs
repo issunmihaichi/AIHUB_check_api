@@ -12,6 +12,9 @@ public sealed class PersistentAppSettings
     public string Platform { get; init; } = "openai";
     public RoutingMode RoutingMode { get; init; } = RoutingMode.Economy;
     public TaskDurationCategory DurationCategory { get; init; } = TaskDurationCategory.Medium;
+    public double BalancedCountdownSeconds { get; init; } = 7_200;
+    public DateTimeOffset? BalancedCountdownEndsAtUtc { get; init; }
+    public double BalancedDeadlineSoftSeconds { get; init; } = BalancedDeadlineEngine.DefaultSoftDeadlineSeconds;
     public int MinimumSuccessPercent { get; init; }
     public int PollingIntervalSeconds { get; init; } = 60;
     public int AccountCacheSeconds { get; init; } = 300;
