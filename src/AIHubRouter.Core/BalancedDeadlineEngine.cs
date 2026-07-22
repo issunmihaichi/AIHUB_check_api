@@ -34,16 +34,6 @@ public static class BalancedDeadlineEngine
     public const double ColdStartThresholdSeconds = 30;
     public const double ContextMissPenaltyUsdPerMultiplier = 2.0;
 
-    public static double EstimateOutputTokens(double remainingSeconds)
-    {
-        if (!double.IsFinite(remainingSeconds) || remainingSeconds <= 0)
-        {
-            return 0;
-        }
-
-        return remainingSeconds * AdaptiveRoutingConstants.PlanningTokensPerSecond;
-    }
-
     public static double CalculateCompletionSeconds(
         RouteCandidate candidate,
         double outputTokens)

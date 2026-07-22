@@ -76,7 +76,7 @@ public static class RouteDecisionEngine
             var deadlineDecision = BalancedDeadlineEngine.Decide(new BalancedDeadlineRequest(
                 current,
                 evaluation.EligibleCandidates,
-                BalancedDeadlineEngine.EstimateOutputTokens(remainingSeconds),
+                context.BalancedExpectedOutputTokens ?? 0,
                 context.CurrentIntervalSeconds,
                 DeadlineSoftSeconds: context.BalancedDeadlineSoftSeconds ??
                     BalancedDeadlineEngine.DefaultSoftDeadlineSeconds));
