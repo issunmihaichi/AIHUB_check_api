@@ -25,6 +25,12 @@ var tests = new (string Name, Action Body)[]
     ("Adaptive balanced requires all safeguards", TestAdaptiveBalancedSafeguards),
     ("Adaptive speed accepts generation boost", TestAdaptiveSpeedAcceptsGenerationBoost),
     ("Adaptive speed accepts end-to-end gain", TestAdaptiveSpeedAcceptsEndToEndGain),
+    ("Balanced deadline estimates output from countdown", TestBalancedDeadlineEstimatesOutput),
+    ("Balanced deadline keeps current feasible node", TestBalancedDeadlineKeepsCurrentNode),
+    ("Balanced deadline switches to cheapest feasible node", TestBalancedDeadlineChoosesCheapestFeasibleNode),
+    ("Balanced deadline cold start chooses cheapest feasible node", TestBalancedDeadlineColdStart),
+    ("Balanced deadline honors user soft tolerance", TestBalancedDeadlineHonorsSoftTolerance),
+    ("Balanced deadline zero falls back to economy", TestBalancedDeadlineZeroFallsBackToEconomy),
     ("Adaptive short task is protected outside cost", TestAdaptiveShortTaskProtection),
     ("Adaptive invalid performance cannot switch", TestAdaptiveInvalidPerformance),
     ("Adaptive invalid old performance cannot satisfy relative time", TestAdaptiveInvalidOldPerformance),
@@ -44,7 +50,7 @@ var tests = new (string Name, Action Body)[]
     ("Selective policy preserves local routing weights", TestSelectivePolicyPreservesLocalWeights),
     ("Cost mode proposes strict cheapest candidate", TestCostModeProposesCheapest),
     ("Cost mode falls back when cheapest TTFT is unknown", TestCostModeFallsBackWhenCheapestTtftIsUnknown),
-    ("Frequent calls override economy with speed", TestFrequentCallsOverrideEconomy),
+    ("Economy remains strict during frequent calls", TestFrequentCallsOverrideEconomy),
     ("Idle calls override speed with cost", TestIdleCallsOverrideSpeed),
     ("Adaptive rejection keeps current group", TestAdaptiveRejectionKeepsCurrentGroup),
     ("Adaptive acceptance updates selected Keys", TestAdaptiveAcceptanceUpdatesKeys),
@@ -383,6 +389,166 @@ static void TestAdaptiveSpeedAcceptsEndToEndGain()
     Assert(!exactBoundary.ShouldSwitch, "Speed mode accepted the strict thirty-second boundary.");
 }
 
+static void TestBalancedDeadlineEstimatesOutput()
+{
+    var outputTokens = BalancedDeadlineEngine.EstimateOutputTokens(26.73);
+    Assert(Math.Abs(outputTokens - (26.73 * AdaptiveRoutingConstants.PlanningTokensPerSecond)) < 1e-9,
+        "Balanced deadline did not convert the countdown to estimated output tokens.");
+    Assert(BalancedDeadlineEngine.DefaultDeadlineSeconds == 26.73,
+        "Balanced deadline changed the configured 90th-percentile SLA.");
+}
+
+static void TestBalancedDeadlineKeepsCurrentNode()
+{
+    var now = DateTimeOffset.UtcNow;
+    var current = new RouteCandidate(
+        Provider(1, 0.05, true, 1, now, 1_000, outputTps: 100),
+        Group(1),
+        0.05,
+        false);
+    var cheaper = new RouteCandidate(
+        Provider(2, 0.01, true, 1, now, 1_000, outputTps: 100),
+        Group(2),
+        0.01,
+        false);
+
+    var decision = BalancedDeadlineEngine.Decide(new BalancedDeadlineRequest(
+        current,
+        [current, cheaper],
+        ExpectedOutputTokens: 1_000,
+        CurrentIntervalSeconds: 10));
+
+    Assert(!decision.ShouldSwitch && decision.Target?.Group.Id == 1 &&
+        decision.Reason == BalancedDeadlineDecisionReason.CurrentWithinDeadline,
+        "Balanced deadline switched away from a current node that met the SLA.");
+}
+
+static void TestBalancedDeadlineChoosesCheapestFeasibleNode()
+{
+    var now = DateTimeOffset.UtcNow;
+    var current = new RouteCandidate(
+        Provider(1, 0.05, true, 1, now, 1_000, outputTps: 50),
+        Group(1),
+        0.05,
+        false);
+    var fasterButExpensive = new RouteCandidate(
+        Provider(2, 0.03, true, 1, now, 500, outputTps: 200),
+        Group(2),
+        0.03,
+        false);
+    var cheapestFeasible = new RouteCandidate(
+        Provider(3, 0.02, true, 1, now, 500, outputTps: 120),
+        Group(3),
+        0.02,
+        false);
+
+    var decision = BalancedDeadlineEngine.Decide(new BalancedDeadlineRequest(
+        current,
+        [current, fasterButExpensive, cheapestFeasible],
+        ExpectedOutputTokens: 3_000,
+        CurrentIntervalSeconds: 10));
+
+    Assert(decision.ShouldSwitch && decision.Target?.Group.Id == 3 &&
+        decision.Reason == BalancedDeadlineDecisionReason.SwitchedAfterDeadline,
+        "Balanced deadline did not choose the lowest-cost feasible node after timeout.");
+}
+
+static void TestBalancedDeadlineColdStart()
+{
+    var now = DateTimeOffset.UtcNow;
+    var current = new RouteCandidate(
+        Provider(1, 0.05, true, 1, now, 1_000, outputTps: 50),
+        Group(1),
+        0.05,
+        false);
+    var infeasibleCheap = new RouteCandidate(
+        Provider(2, 0.01, true, 1, now, 500, outputTps: 100),
+        Group(2),
+        0.01,
+        false);
+    var feasible = new RouteCandidate(
+        Provider(3, 0.02, true, 1, now, 500, outputTps: 120),
+        Group(3),
+        0.02,
+        false);
+
+    var decision = BalancedDeadlineEngine.Decide(new BalancedDeadlineRequest(
+        current,
+        [current, infeasibleCheap, feasible],
+        ExpectedOutputTokens: 3_000,
+        CurrentIntervalSeconds: 30.001,
+        DeadlineSoftSeconds: 0));
+
+    Assert(decision.ShouldSwitch && decision.Target?.Group.Id == 3 &&
+        decision.Reason == BalancedDeadlineDecisionReason.ColdStart,
+        "Balanced cold start did not choose the cheapest feasible node.");
+}
+
+static void TestBalancedDeadlineHonorsSoftTolerance()
+{
+    var now = DateTimeOffset.UtcNow;
+    var current = new RouteCandidate(
+        Provider(1, 0.05, true, 1, now, 1_000, outputTps: 25),
+        Group(1),
+        0.05,
+        false);
+    var affordable = new RouteCandidate(
+        Provider(2, 0.01, true, 1, now, 1_000, outputTps: 34.5),
+        Group(2),
+        0.01,
+        false);
+
+    var withTolerance = BalancedDeadlineEngine.Decide(new BalancedDeadlineRequest(
+        current,
+        [current, affordable],
+        ExpectedOutputTokens: 1_000,
+        CurrentIntervalSeconds: 10,
+        DeadlineSoftSeconds: 5));
+    var withoutTolerance = BalancedDeadlineEngine.Decide(new BalancedDeadlineRequest(
+        current,
+        [current, affordable],
+        ExpectedOutputTokens: 1_000,
+        CurrentIntervalSeconds: 10,
+        DeadlineSoftSeconds: 0));
+
+    Assert(withTolerance.ShouldSwitch && withTolerance.Target?.Group.Id == 2 &&
+        withTolerance.Reason == BalancedDeadlineDecisionReason.SwitchedAfterDeadline,
+        "A feasible candidate inside the user soft deadline was not selected.");
+    Assert(withoutTolerance.Reason == BalancedDeadlineDecisionReason.NoFeasibleCandidate,
+        "A zero soft tolerance did not preserve the hard deadline boundary.");
+}
+
+static void TestBalancedDeadlineZeroFallsBackToEconomy()
+{
+    var now = DateTimeOffset.UtcNow;
+    var evaluation = RoutingEngine.Evaluate(
+        [
+            Provider(1, 0.01, true, 1, now, 1_000, outputTps: 100),
+            Provider(2, 0.05, true, 1, now, 1_000, outputTps: 100)
+        ],
+        [Group(1), Group(2)],
+        new Dictionary<long, double>(),
+        Policy(RoutingMode.Balanced),
+        now);
+
+    var result = RouteDecisionEngine.Decide(
+        evaluation,
+        new RouteState { CurrentGroupId = 2 },
+        Policy(RoutingMode.Balanced),
+        new AdaptiveRoutingContext(
+            RoutingMode.Balanced,
+            TaskDurationCategory.Medium,
+            CurrentIntervalSeconds: 10,
+            BalancedRemainingSeconds: 0),
+        now,
+        observedCurrentGroupId: 2);
+
+    Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 1 &&
+        result.Decision.EffectivePreference == AdaptivePreference.Cost &&
+        result.Decision.Reason == RouteDecisionReason.BalancedCountdownExpired,
+        "A zero Balanced countdown did not fall back to strict Economy.");
+}
+
 static void TestAdaptiveShortTaskProtection()
 {
     var result = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
@@ -493,6 +659,15 @@ static void TestRoutingPresentationPreservesAvailabilityThreshold()
         now: now,
         maximumStatusAge: TimeSpan.FromMinutes(15));
     Assert(state == "低于阈值", "Warning decoration bypassed the local availability threshold.");
+    Assert(!ProviderStatusPresentation.IsRoutable(
+            provider,
+            hasAccountData: true,
+            isAuthorized: true,
+            effectiveMultiplier: provider.PriceMultiplier,
+            minimumSuccessRate6h: 0.5,
+            now: now,
+            maximumStatusAge: TimeSpan.FromMinutes(15)),
+        "A provider below the local availability threshold was marked routable.");
 }
 
 static void TestRoutingPresentationRejectsInvalidEffectiveRate()
@@ -528,6 +703,8 @@ static void TestRoutingPreferenceDefaults()
     var settings = new PersistentAppSettings();
     Assert(settings.RoutingMode == RoutingMode.Economy, "New installs must preserve lowest-price routing.");
     Assert(settings.DurationCategory == TaskDurationCategory.Medium, "New installs must default to Medium duration.");
+    Assert(settings.BalancedCountdownSeconds == 7_200, "Balanced countdown must preserve the Medium default.");
+    Assert(settings.BalancedDeadlineSoftSeconds == 5, "Balanced deadline soft tolerance must default to five seconds.");
     Assert(settings.AccountCacheSeconds == 300, "Account cache default changed.");
     Assert(settings.Theme == WinFormsTheme.System, "Theme must follow Windows by default.");
 }
@@ -547,6 +724,9 @@ static void TestRoutingPreferenceRoundtrip()
         {
             RoutingMode = RoutingMode.Speed,
             DurationCategory = TaskDurationCategory.Long,
+            BalancedCountdownSeconds = 1_234.5,
+            BalancedCountdownEndsAtUtc = DateTimeOffset.Parse("2026-07-21T10:00:00Z"),
+            BalancedDeadlineSoftSeconds = 8.5,
             AccountCacheSeconds = 90,
             Theme = WinFormsTheme.Dark
         }, null);
@@ -554,6 +734,12 @@ static void TestRoutingPreferenceRoundtrip()
         var loaded = store.Load().Settings;
         Assert(loaded.RoutingMode == RoutingMode.Speed, "Routing mode did not roundtrip.");
         Assert(loaded.DurationCategory == TaskDurationCategory.Long, "Duration category did not roundtrip.");
+        Assert(Math.Abs(loaded.BalancedCountdownSeconds - 1_234.5) < 0.0001,
+            "Balanced countdown duration did not roundtrip.");
+        Assert(loaded.BalancedCountdownEndsAtUtc == DateTimeOffset.Parse("2026-07-21T10:00:00Z"),
+            "Balanced countdown end timestamp did not roundtrip.");
+        Assert(Math.Abs(loaded.BalancedDeadlineSoftSeconds - 8.5) < 0.0001,
+            "Balanced deadline soft tolerance did not roundtrip.");
         Assert(loaded.AccountCacheSeconds == 90, "Cache duration did not roundtrip.");
         Assert(loaded.Theme == WinFormsTheme.Dark, "Theme did not roundtrip.");
     }
@@ -672,10 +858,10 @@ static void TestCostModeFallsBackWhenCheapestTtftIsUnknown()
         now,
         observedCurrentGroupId: 3);
 
-    Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 2,
-        "Cost mode did not fall back to the cheapest candidate with valid completion metrics.");
+    Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 1,
+        "Economy mode did not select the strict lowest effective multiplier.");
     Assert(result.Decision.Reason == RouteDecisionReason.AdaptiveCostAccepted,
-        "Cost fallback did not preserve the accepted adaptive reason.");
+        "Strict Economy selection did not preserve the accepted cost reason.");
 }
 
 static void TestFrequentCallsOverrideEconomy()
@@ -698,10 +884,10 @@ static void TestFrequentCallsOverrideEconomy()
         new AdaptiveRoutingContext(RoutingMode.Economy, TaskDurationCategory.Medium, 2),
         now,
         observedCurrentGroupId: 1);
-    Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 2,
-        "A frequent call interval did not allow the faster candidate.");
-    Assert(result.Decision.EffectivePreference == AdaptivePreference.Speed,
-        "Economy was not dynamically overridden with Speed.");
+    Assert(!result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 1,
+        "Economy mode did not keep the strict lowest-cost route during a frequent call interval.");
+    Assert(result.Decision.EffectivePreference == AdaptivePreference.Cost,
+        "Economy mode was incorrectly overridden with Speed.");
 }
 
 static void TestIdleCallsOverrideSpeed()
@@ -877,6 +1063,9 @@ static void TestAdaptiveRankingsFollowAcceptedAlgorithmOrder()
     Assert(rankings.Single(ranking => ranking.GroupId == 3).Rank == 1 &&
         rankings.Single(ranking => ranking.GroupId == 2).Rank == 2,
         "Accepted adaptive candidates did not receive sequential ranks.");
+    Assert(rankings.Single(ranking => ranking.GroupId == 3).ProviderId == "provider-3" &&
+        rankings.Single(ranking => ranking.GroupId == 2).ProviderId == "provider-2",
+        "Adaptive rankings did not retain the provider that was actually evaluated.");
     Assert(!rankings.Single(ranking => ranking.GroupId == 4).Accepted &&
         rankings.Single(ranking => ranking.GroupId == 4).Rank is null &&
         rankings.Single(ranking => ranking.GroupId == 4).Reason == AdaptiveDecisionReason.BalancedGuardRejected,

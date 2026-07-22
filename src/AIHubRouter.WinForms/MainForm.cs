@@ -10,6 +10,7 @@ internal sealed partial class MainForm : Form
 {
     private readonly CancellationTokenSource _shutdown = new();
     private readonly System.Windows.Forms.Timer _autoTimer = new();
+    private readonly System.Windows.Forms.Timer _balancedCountdownTimer = new() { Interval = 500 };
     private readonly AppSettingsStore _settingsStore = new();
     private bool _busy;
     private bool _hasLoadedKeys;
@@ -26,6 +27,11 @@ internal sealed partial class MainForm : Form
     private IReadOnlyDictionary<long, double> _userRates = new Dictionary<long, double>();
     private IReadOnlyList<AdaptiveCandidateRanking> _adaptiveRankings = [];
     private RouteCandidate? _bestCandidate;
+    private double _balancedCountdownSeconds = 7_200;
+    private double _balancedDeadlineSoftSeconds = BalancedDeadlineEngine.DefaultSoftDeadlineSeconds;
+    private DateTimeOffset? _balancedCountdownEndsAtUtc;
+    private bool _updatingBalancedCountdown;
+    private bool _balancedCountdownExpiredApplied;
 
     public MainForm()
     {
@@ -51,6 +57,7 @@ internal sealed partial class MainForm : Form
             }
 
             _autoTimer.Stop();
+            _balancedCountdownTimer.Stop();
             _routingService?.Dispose();
             _shutdown.Cancel();
             _toolTip.Dispose();
@@ -111,8 +118,17 @@ internal sealed partial class MainForm : Form
             RecalculateCandidate();
             SaveCurrentSettings(showStatus: false);
         };
-        _durationCombo.SelectedIndexChanged += (_, _) =>
+        _balancedCountdownInput.ValueChanged += (_, _) =>
         {
+            if (!_updatingBalancedCountdown)
+            {
+                RestartBalancedCountdown();
+            }
+        };
+        _resetBalancedCountdownButton.Click += (_, _) => RestartBalancedCountdown();
+        _balancedSoftDeadlineInput.ValueChanged += (_, _) =>
+        {
+            _balancedDeadlineSoftSeconds = (double)_balancedSoftDeadlineInput.Value;
             InvalidateRoutingService();
             RecalculateCandidate();
             SaveCurrentSettings(showStatus: false);
@@ -129,7 +145,10 @@ internal sealed partial class MainForm : Form
         };
         _keyGrid.CellValueChanged += (_, eventArgs) => HandleKeySelectionChanged(eventArgs);
         _autoTimer.Tick += async (_, _) => await ExecuteRoutingCycleAsync();
+        _balancedCountdownTimer.Tick += (_, _) => UpdateBalancedCountdownDisplay();
         UpdateTimerInterval();
+        UpdateBalancedCountdownDisplay();
+        _balancedCountdownTimer.Start();
     }
 
     private async Task ValidateAuthenticationAsync()
@@ -317,8 +336,12 @@ internal sealed partial class MainForm : Form
         ApplyKeys(result.Keys);
 
         var groupLookup = _groups.ToDictionary(group => group.Id);
-        var candidateLookup = result.Evaluation.EligibleCandidates.ToDictionary(candidate => candidate.Group.Id);
-        var adaptiveRankingLookup = result.Decision.AdaptiveRankings.ToDictionary(ranking => ranking.GroupId);
+        var candidateLookup = result.Evaluation.EligibleCandidates.ToDictionary(
+            candidate => candidate.Provider.Id,
+            StringComparer.Ordinal);
+        var adaptiveRankingLookup = result.Decision.AdaptiveRankings.ToDictionary(
+            ranking => ranking.ProviderId,
+            StringComparer.Ordinal);
         var minimumSuccessRate6h = (double)_minimumSuccessInput.Value / 100;
         var maximumStatusAge = TimeSpan.FromMinutes(15);
         var rows = result.Providers
@@ -326,46 +349,66 @@ internal sealed partial class MainForm : Form
             .Select(provider =>
             {
                 var groupId = provider.GroupId;
-                var score = groupId is { } id && result.Evaluation.CandidateScores.TryGetValue(id, out var value)
-                    ? value.ToString("0.###")
-                    : "-";
-                var adaptiveRank = ResolveAdaptiveRank(groupId, adaptiveRankingLookup, out var adaptiveRankValue);
+                var hasCandidate = candidateLookup.TryGetValue(provider.Id, out var candidate);
+                var candidateScore = double.NegativeInfinity;
+                var hasScore = hasCandidate && result.Evaluation.CandidateScores.TryGetValue(
+                    candidate!.Group.Id,
+                    out candidateScore);
+                var score = hasScore ? candidateScore.ToString("0.###") : "-";
+                var scoreValue = hasScore ? candidateScore : double.NegativeInfinity;
+                var adaptiveRank = ResolveAdaptiveRank(provider.Id, adaptiveRankingLookup, out var adaptiveRankValue);
                 var decisionState = groupId is { } decisionGroupId && decisionGroupId == result.Decision.Target?.Group.Id ? "推荐"
                     : groupId is { } currentGroupId && currentGroupId == result.Decision.Current?.Group.Id ? "当前"
                     : groupId is { } baselineGroupId && baselineGroupId == result.Evaluation.Baseline?.Group.Id ? "最低价"
                     : string.Empty;
+                if (!hasCandidate)
+                {
+                    decisionState = string.Empty;
+                }
                 var overrideRate = 0d;
                 var hasOverride = groupId is { } overrideGroupId && _userRates.TryGetValue(overrideGroupId, out overrideRate);
                 var effectiveMultiplier = hasOverride ? overrideRate : provider.PriceMultiplier;
-                if (groupId is { } effectiveGroup && candidateLookup.TryGetValue(effectiveGroup, out var candidate))
+                if (hasCandidate)
                 {
-                    effectiveMultiplier = candidate.EffectiveMultiplier;
+                    effectiveMultiplier = candidate!.EffectiveMultiplier;
                     hasOverride = candidate.HasUserRateOverride;
                 }
 
+                var isAuthorized = groupId is { } authorizedGroupId && groupLookup.ContainsKey(authorizedGroupId);
+                var isRoutable = ProviderStatusPresentation.IsRoutable(
+                    provider,
+                    hasAccountData: true,
+                    isAuthorized,
+                    effectiveMultiplier,
+                    minimumSuccessRate6h,
+                    result.Decision.EvaluatedAt,
+                    maximumStatusAge);
                 var effective = $"{effectiveMultiplier:0.####}{(hasOverride ? " *" : string.Empty)}";
                 return new ProviderGridRow
                 {
                     Source = provider,
-                    IsBest = groupId is { } targetGroupId && targetGroupId == result.Decision.Target?.Group.Id,
+                    IsRoutable = isRoutable,
+                    IsBest = provider.Id == result.Decision.Target?.Provider.Id,
                     EffectiveRate = effective,
                     WeightedScore = score,
+                    WeightedScoreValue = scoreValue,
                     AdaptiveRank = adaptiveRank,
                     AdaptiveRankValue = adaptiveRankValue,
                     DecisionState = decisionState,
                     State = ProviderStatusPresentation.ResolveRoutingState(
                         provider,
                         hasAccountData: true,
-                        isAuthorized: groupId is { } authorizedId && groupLookup.ContainsKey(authorizedId),
+                        isAuthorized,
                         effectiveMultiplier: effectiveMultiplier,
                         minimumSuccessRate6h: minimumSuccessRate6h,
                         now: result.Decision.EvaluatedAt,
                         maximumStatusAge: maximumStatusAge)
                 };
             })
-            .OrderBy(row => row.AdaptiveRankValue)
+            .OrderByDescending(row => row.IsRoutable)
+            .ThenBy(row => row.AdaptiveRankValue)
             .ThenByDescending(row => row.IsBest)
-            .ThenBy(row => row.WeightedScore)
+            .ThenByDescending(row => row.WeightedScoreValue)
             .ToList();
         _providerGrid.DataSource = new BindingList<ProviderGridRow>(rows);
         var effectiveMode = PreferenceDisplayName(result.Decision.EffectivePreference);
@@ -403,6 +446,7 @@ internal sealed partial class MainForm : Form
                 "AIHubRouter", "logs");
             var writer = new AuditLogWriter(Path.Combine(directory, "routing.jsonl"));
             var adaptive = result.Decision.AdaptiveDecision;
+            var balanced = result.Decision.BalancedDeadlineDecision;
             writer.Write(new RouteAuditEntry(
                 result.CompletedAt,
                 CurrentRoutingMode(),
@@ -430,7 +474,12 @@ internal sealed partial class MainForm : Form
                 NetSavingUsd = adaptive?.NetSavingUsd,
                 OldCompletionSeconds = adaptive?.OldCompletionSeconds,
                 NewCompletionSeconds = adaptive?.NewCompletionSeconds,
-                DeltaSeconds = adaptive?.DeltaSeconds
+                DeltaSeconds = adaptive?.DeltaSeconds,
+                BalancedDeadlineReason = balanced?.Reason,
+                BalancedOutputTokens = balanced?.OutputTokens,
+                BalancedCurrentCompletionSeconds = balanced?.CurrentCompletionSeconds,
+                BalancedTargetCompletionSeconds = balanced?.TargetCompletionSeconds,
+                BalancedTargetCostUsd = balanced?.TargetCostUsd
             });
         }
         catch
@@ -448,6 +497,9 @@ internal sealed partial class MainForm : Form
             Platform = _platformCombo.SelectedItem?.ToString() ?? "openai",
             RoutingMode = CurrentRoutingMode(),
             DurationCategory = CurrentDurationCategory(),
+            BalancedCountdownSeconds = _balancedCountdownSeconds,
+            BalancedCountdownEndsAtUtc = _balancedCountdownEndsAtUtc,
+            BalancedDeadlineSoftSeconds = _balancedDeadlineSoftSeconds,
             MinimumSuccessPercent = (int)_minimumSuccessInput.Value,
             PollingIntervalSeconds = (int)_intervalInput.Value,
             AccountCacheSeconds = (int)_accountCacheInput.Value,
@@ -472,12 +524,11 @@ internal sealed partial class MainForm : Form
 
     private TaskDurationCategory CurrentDurationCategory()
     {
-        return _durationCombo.SelectedIndex switch
-        {
-            0 => TaskDurationCategory.Short,
-            2 => TaskDurationCategory.Long,
-            _ => TaskDurationCategory.Medium
-        };
+        return _balancedCountdownSeconds <= 3_600
+            ? TaskDurationCategory.Short
+            : _balancedCountdownSeconds <= 21_600
+                ? TaskDurationCategory.Medium
+                : TaskDurationCategory.Long;
     }
 
     private static string PreferenceDisplayName(AdaptivePreference? preference) => preference switch
@@ -488,12 +539,12 @@ internal sealed partial class MainForm : Form
     };
 
     private static string ResolveAdaptiveRank(
-        long? groupId,
-        IReadOnlyDictionary<long, AdaptiveCandidateRanking> rankings,
+        string providerId,
+        IReadOnlyDictionary<string, AdaptiveCandidateRanking> rankings,
         out int rankValue)
     {
         rankValue = int.MaxValue;
-        if (groupId is not { } id || !rankings.TryGetValue(id, out var ranking))
+        if (string.IsNullOrWhiteSpace(providerId) || !rankings.TryGetValue(providerId, out var ranking))
         {
             return "-";
         }
@@ -511,6 +562,11 @@ internal sealed partial class MainForm : Form
     {
         return reason switch
         {
+            RouteDecisionReason.BalancedDeadlineColdStart => "均衡冷启动：选择满足截止时间的最低倍率节点",
+            RouteDecisionReason.BalancedDeadlineCurrentWithinDeadline => "均衡：当前节点满足截止时间，保持不切换",
+            RouteDecisionReason.BalancedDeadlineSwitched => "均衡：当前节点超时，切换到满足截止时间的最低成本节点",
+            RouteDecisionReason.BalancedDeadlineNoFeasibleCandidate => "均衡：没有节点满足截止时间，保持当前路线",
+            RouteDecisionReason.BalancedCountdownExpired => "均衡倒计时结束：已切换为严格经济模式",
             RouteDecisionReason.NoCandidate => "没有符合条件的路由",
             RouteDecisionReason.InitialRoute => "建立初始路由",
             RouteDecisionReason.CurrentRouteInvalid => "当前路由已不可用",
@@ -657,15 +713,29 @@ internal sealed partial class MainForm : Form
             CurrentDurationCategory(),
             previewState with { CurrentGroupId = previewCurrentGroupId },
             now,
-            observedGroupId);
+            observedGroupId,
+            CurrentRoutingMode() == RoutingMode.Balanced
+                ? GetBalancedRemainingSeconds(now)
+                : null,
+            CurrentRoutingMode() == RoutingMode.Balanced
+                ? _balancedDeadlineSoftSeconds
+                : null);
         _lastEvaluation = snapshot.Evaluation;
         _adaptiveRankings = snapshot.Result.Decision.AdaptiveRankings;
         _bestCandidate = snapshot.Result.Decision.Target;
 
         ApplyProviders(criteria);
+        var effectiveMode = PreferenceDisplayName(snapshot.Result.Decision.EffectivePreference);
+        var modeText = effectiveMode == ModeDisplayName()
+            ? effectiveMode
+            : $"{ModeDisplayName()}→{effectiveMode}";
         _candidateLabel.Text = _bestCandidate is null
             ? $"{ModeDisplayName()}：无符合项"
             : $"{ModeDisplayName()}：{_bestCandidate.Provider.PlanType}  {_bestCandidate.EffectiveMultiplier:0.####}x";
+        _candidateLabel.Text = _candidateLabel.Text.Replace(
+            ModeDisplayName(),
+            modeText,
+            StringComparison.Ordinal);
     }
 
     private void ApplyProviders(RoutingCriteria criteria)
@@ -677,7 +747,12 @@ internal sealed partial class MainForm : Form
 
         var now = DateTimeOffset.UtcNow;
         var groups = _groups.ToDictionary(group => group.Id);
-        var adaptiveRankingLookup = _adaptiveRankings.ToDictionary(ranking => ranking.GroupId);
+        var adaptiveRankingLookup = _adaptiveRankings.ToDictionary(
+            ranking => ranking.ProviderId,
+            StringComparer.Ordinal);
+        var candidateLookup = _lastEvaluation?.EligibleCandidates.ToDictionary(
+            candidate => candidate.Provider.Id,
+            StringComparer.Ordinal) ?? new Dictionary<string, RouteCandidate>(StringComparer.Ordinal);
         var rows = _summary.Apis
             .Where(provider => provider.Platform.Equals(criteria.Platform, StringComparison.OrdinalIgnoreCase))
             .Select(provider =>
@@ -686,27 +761,40 @@ internal sealed partial class MainForm : Form
                 var overrideRate = 0d;
                 var hasOverride = provider.GroupId is { } id && _userRates.TryGetValue(id, out overrideRate);
                 var effectiveRate = hasOverride ? overrideRate : provider.PriceMultiplier;
-                var adaptiveRank = ResolveAdaptiveRank(provider.GroupId, adaptiveRankingLookup, out var adaptiveRankValue);
-                if (provider.GroupId is { } candidateGroup &&
-                    _lastEvaluation?.EligibleCandidates.FirstOrDefault(candidate => candidate.Group.Id == candidateGroup) is { } evaluatedCandidate)
+                var hasCandidate = candidateLookup.TryGetValue(provider.Id, out var evaluatedCandidate);
+                var adaptiveRank = ResolveAdaptiveRank(provider.Id, adaptiveRankingLookup, out var adaptiveRankValue);
+                if (hasCandidate)
                 {
-                    effectiveRate = evaluatedCandidate.EffectiveMultiplier;
+                    effectiveRate = evaluatedCandidate!.EffectiveMultiplier;
                     hasOverride = evaluatedCandidate.HasUserRateOverride;
                 }
+                var candidateScore = double.NegativeInfinity;
+                var hasScore = hasCandidate && _lastEvaluation!.CandidateScores.TryGetValue(
+                    evaluatedCandidate!.Group.Id,
+                    out candidateScore);
+                var score = hasScore ? candidateScore.ToString("0.###") : "-";
+                var scoreValue = hasScore ? candidateScore : double.NegativeInfinity;
+                var isRoutable = ProviderStatusPresentation.IsRoutable(
+                    provider,
+                    hasAccountData: _groups.Count > 0,
+                    isAuthorized,
+                    effectiveRate,
+                    criteria.MinimumSuccessRate6h,
+                    now,
+                    criteria.MaximumStatusAge);
                 return new ProviderGridRow
                 {
                     Source = provider,
+                    IsRoutable = isRoutable,
                     IsBest = _bestCandidate?.Provider.Id == provider.Id,
                     EffectiveRate = hasOverride ? $"{effectiveRate:0.####} *" : $"{effectiveRate:0.####}",
-                    WeightedScore = provider.GroupId is { } scoreGroupId &&
-                        _lastEvaluation?.CandidateScores.TryGetValue(scoreGroupId, out var score) == true
-                            ? score.ToString("0.###")
-                            : "-",
+                    WeightedScore = score,
+                    WeightedScoreValue = scoreValue,
                     AdaptiveRank = adaptiveRank,
                     AdaptiveRankValue = adaptiveRankValue,
-                    DecisionState = provider.GroupId is { } recommendedGroupId &&
+                    DecisionState = hasCandidate && provider.GroupId is { } recommendedGroupId &&
                         recommendedGroupId == _lastEvaluation?.Recommended?.Group.Id ? "推荐"
-                        : provider.GroupId is { } baselineGroupId &&
+                        : hasCandidate && provider.GroupId is { } baselineGroupId &&
                             baselineGroupId == _lastEvaluation?.Baseline?.Group.Id ? "最低价"
                         : string.Empty,
                     State = ProviderStatusPresentation.ResolveRoutingState(
@@ -719,7 +807,8 @@ internal sealed partial class MainForm : Form
                         maximumStatusAge: criteria.MaximumStatusAge)
                 };
             })
-            .OrderBy(row => row.AdaptiveRankValue)
+            .OrderByDescending(row => row.IsRoutable)
+            .ThenBy(row => row.AdaptiveRankValue)
             .ThenByDescending(row => row.IsBest)
             .ThenBy(row => row.Source.PriceMultiplier)
             .ThenByDescending(row => row.Source.SuccessRate6h ?? 0)
@@ -826,6 +915,50 @@ internal sealed partial class MainForm : Form
         _autoTimer.Interval = checked((int)_intervalInput.Value * 1000);
     }
 
+    private double GetBalancedRemainingSeconds(DateTimeOffset now)
+    {
+        if (_balancedCountdownEndsAtUtc is not { } end)
+        {
+            return 0;
+        }
+
+        var remaining = (end - now).TotalSeconds;
+        return double.IsFinite(remaining) ? Math.Max(0, remaining) : 0;
+    }
+
+    private void RestartBalancedCountdown()
+    {
+        _balancedCountdownSeconds = Math.Max(0, (double)_balancedCountdownInput.Value * 60);
+        _balancedCountdownEndsAtUtc = DateTimeOffset.UtcNow.AddSeconds(_balancedCountdownSeconds);
+        _balancedCountdownExpiredApplied = false;
+        UpdateBalancedCountdownDisplay();
+        InvalidateRoutingService();
+        RecalculateCandidate();
+        SaveCurrentSettings(showStatus: false);
+    }
+
+    private void UpdateBalancedCountdownDisplay()
+    {
+        var remaining = GetBalancedRemainingSeconds(DateTimeOffset.UtcNow);
+        if (CurrentRoutingMode() == RoutingMode.Balanced && remaining <= 0 && !_balancedCountdownExpiredApplied)
+        {
+            _balancedCountdownExpiredApplied = true;
+            InvalidateRoutingService();
+            RecalculateCandidate();
+        }
+        else if (remaining > 0)
+        {
+            _balancedCountdownExpiredApplied = false;
+        }
+        var totalSeconds = Math.Max(0, Math.Round(remaining));
+        var hours = (int)(totalSeconds / 3600);
+        var minutes = (int)((totalSeconds % 3600) / 60);
+        var seconds = (int)(totalSeconds % 60);
+        _balancedCountdownLabel.Text = hours > 0
+            ? $"剩余 {hours:00}:{minutes:00}:{seconds:00}"
+            : $"剩余 {minutes:00}:{seconds:00}";
+    }
+
     private void ToggleCredentialVisibility()
     {
         var hidden = !_showCredentialsCheck.Checked;
@@ -918,12 +1051,46 @@ internal sealed partial class MainForm : Form
                 RoutingMode.Speed => 2,
                 _ => 0
             };
-            _durationCombo.SelectedIndex = settings.DurationCategory switch
+            var configuredCountdownSeconds = settings.BalancedCountdownSeconds;
+            if (!double.IsFinite(configuredCountdownSeconds) || configuredCountdownSeconds < 0)
             {
-                TaskDurationCategory.Short => 0,
-                TaskDurationCategory.Long => 2,
-                _ => 1
-            };
+                configuredCountdownSeconds = settings.DurationCategory switch
+                {
+                    TaskDurationCategory.Short => 3_600,
+                    TaskDurationCategory.Long => 21_600,
+                    _ => 7_200
+                };
+            }
+
+            _balancedCountdownSeconds = Math.Clamp(configuredCountdownSeconds, 0, 86_400);
+            _updatingBalancedCountdown = true;
+            try
+            {
+                _balancedCountdownInput.Value = (decimal)(_balancedCountdownSeconds / 60);
+            }
+            finally
+            {
+                _updatingBalancedCountdown = false;
+            }
+
+            _balancedCountdownEndsAtUtc = settings.BalancedCountdownEndsAtUtc;
+            if (_balancedCountdownEndsAtUtc is null)
+            {
+                _balancedCountdownEndsAtUtc = DateTimeOffset.UtcNow.AddSeconds(_balancedCountdownSeconds);
+            }
+
+            _balancedDeadlineSoftSeconds = double.IsFinite(settings.BalancedDeadlineSoftSeconds)
+                ? Math.Clamp(settings.BalancedDeadlineSoftSeconds, 0, 300)
+                : BalancedDeadlineEngine.DefaultSoftDeadlineSeconds;
+            _updatingBalancedCountdown = true;
+            try
+            {
+                _balancedSoftDeadlineInput.Value = (decimal)_balancedDeadlineSoftSeconds;
+            }
+            finally
+            {
+                _updatingBalancedCountdown = false;
+            }
             _themeCombo.SelectedIndex = settings.Theme switch
             {
                 WinFormsTheme.Light => 1,

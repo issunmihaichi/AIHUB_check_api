@@ -14,7 +14,9 @@ public static class RouteDecisionCoordinator
         TaskDurationCategory durationCategory,
         RouteState state,
         DateTimeOffset now,
-        long? observedCurrentGroupId = null)
+        long? observedCurrentGroupId = null,
+        double? balancedRemainingSeconds = null,
+        double? balancedDeadlineSoftSeconds = null)
     {
         ArgumentNullException.ThrowIfNull(providers);
         ArgumentNullException.ThrowIfNull(groups);
@@ -24,15 +26,23 @@ public static class RouteDecisionCoordinator
         basePolicy.Validate();
 
         var currentGroupId = observedCurrentGroupId ?? state.CurrentGroupId;
-        var currentInterval = AdaptiveSwitchDecisionEngine.ResolveCurrentIntervalSeconds(
-            providers,
-            currentGroupId,
-            basePolicy.Platform,
-            now);
+        var currentInterval = currentGroupId is null
+            ? null
+            : AdaptiveSwitchDecisionEngine.ResolveCurrentIntervalSeconds(
+                providers,
+                currentGroupId,
+                basePolicy.Platform,
+                now);
         var basePreference = AdaptiveSwitchDecisionEngine.ToPreference(basePolicy.Mode);
-        var effectivePreference = AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(
-            currentInterval,
-            basePreference);
+        var effectivePreference = basePolicy.Mode switch
+        {
+            RoutingMode.Economy => AdaptivePreference.Cost,
+            RoutingMode.Balanced when balancedRemainingSeconds is { } remaining =>
+                remaining <= 0 ? AdaptivePreference.Cost : AdaptivePreference.Balanced,
+            _ => AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(
+                currentInterval,
+                basePreference)
+        };
         var effectivePolicy = basePolicy with
         {
             Mode = AdaptiveSwitchDecisionEngine.ToRoutingMode(effectivePreference)
@@ -50,7 +60,9 @@ public static class RouteDecisionCoordinator
             new AdaptiveRoutingContext(
                 basePolicy.Mode,
                 durationCategory,
-                currentInterval),
+                currentInterval,
+                balancedRemainingSeconds,
+                balancedDeadlineSoftSeconds),
             now,
             observedCurrentGroupId);
 

@@ -1,4 +1,5 @@
 using System.Drawing;
+using AIHubRouter.Core;
 
 namespace AIHubRouter.WinForms;
 
@@ -28,7 +29,26 @@ internal sealed partial class MainForm
     private readonly Button _routeNowButton = new() { Text = "立即路由", AutoSize = true };
     private readonly ComboBox _platformCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 110 };
     private readonly ComboBox _routingModeCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 92 };
-    private readonly ComboBox _durationCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 110 };
+    private readonly NumericUpDown _balancedCountdownInput = new()
+    {
+        Minimum = 0,
+        Maximum = 1440,
+        Increment = 1,
+        DecimalPlaces = 1,
+        Value = 120,
+        Width = 82
+    };
+    private readonly Button _resetBalancedCountdownButton = new() { Text = "重置", AutoSize = true };
+    private readonly Label _balancedCountdownLabel = new() { AutoSize = true, Text = "剩余 --" };
+    private readonly NumericUpDown _balancedSoftDeadlineInput = new()
+    {
+        Minimum = 0,
+        Maximum = 300,
+        Increment = 0.5M,
+        DecimalPlaces = 1,
+        Value = (decimal)BalancedDeadlineEngine.DefaultSoftDeadlineSeconds,
+        Width = 70
+    };
     private readonly ComboBox _themeCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 112 };
     private readonly NumericUpDown _minimumSuccessInput = new()
     {
@@ -87,8 +107,6 @@ internal sealed partial class MainForm
         _platformCombo.SelectedIndex = 0;
         _routingModeCombo.Items.AddRange(["经济", "均衡", "速度"]);
         _routingModeCombo.SelectedIndex = 0;
-        _durationCombo.Items.AddRange(["短任务", "1-4 小时", "4 小时以上"]);
-        _durationCombo.SelectedIndex = 1;
         _themeCombo.Items.AddRange(["跟随系统", "浅色", "深色"]);
         _themeCombo.SelectedIndex = 0;
 
@@ -267,8 +285,13 @@ internal sealed partial class MainForm
         panel.Controls.Add(_verticalSyncCheck);
         panel.Controls.Add(CreateToolbarLabel("模式"));
         panel.Controls.Add(_routingModeCombo);
-        panel.Controls.Add(CreateToolbarLabel("时长"));
-        panel.Controls.Add(_durationCombo);
+        panel.Controls.Add(CreateToolbarLabel("均衡倒计时"));
+        panel.Controls.Add(_balancedCountdownInput);
+        panel.Controls.Add(CreateToolbarLabel("分钟"));
+        panel.Controls.Add(_resetBalancedCountdownButton);
+        panel.Controls.Add(_balancedCountdownLabel);
+        panel.Controls.Add(CreateToolbarLabel("软截止 + 秒"));
+        panel.Controls.Add(_balancedSoftDeadlineInput);
         panel.Controls.Add(CreateToolbarLabel("主题"));
         panel.Controls.Add(_themeCombo);
         panel.Controls.Add(_refreshButton);
@@ -443,7 +466,10 @@ internal sealed partial class MainForm
         _toolTip.SetToolTip(_providerGrid, "拖动列分隔线时调整右侧列：向左扩宽右侧列，向右缩窄右侧列。");
         _toolTip.SetToolTip(_keyGrid, "拖动列分隔线时调整右侧列：向左扩宽右侧列，向右缩窄右侧列。");
         _toolTip.SetToolTip(_routingModeCombo, "经济优先价格；均衡权衡价格和首 token 延迟；速度优先低延迟。");
-        _toolTip.SetToolTip(_durationCombo, "短任务少于 1 小时；中任务 1-4 小时；长任务超过 4 小时。");
+        _toolTip.SetToolTip(_balancedCountdownInput, "均衡模式的任务倒计时。倒计时归零后自动使用经济模式；修改数值会重新开始倒计时。输入 0 可立即使用经济模式。");
+        _toolTip.SetToolTip(_resetBalancedCountdownButton, "按当前分钟数重新开始均衡倒计时。");
+        _toolTip.SetToolTip(_balancedCountdownLabel, "均衡模式剩余时间；同时用于估算本轮输出量。");
+        _toolTip.SetToolTip(_balancedSoftDeadlineInput, "均衡模式的用户容忍度：在当前节点超出 26.73 秒硬截止后，允许候选节点最多额外慢多少秒。数值越大越偏向省钱。");
         _toolTip.SetToolTip(_simulateButton, "只计算并展示决策，不会修改任何 API Key。");
         _toolTip.SetToolTip(_themeCombo, "跟随 Windows 个性化设置，或固定浅色/深色 WinForms 调色板。");
         _toolTip.SetToolTip(_accountCacheInput, "账户分组、倍率和 Key 列表在此时间内复用；监控数据每次刷新。");

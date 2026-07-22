@@ -250,7 +250,12 @@ public enum RouteDecisionReason
     AdaptiveCostRejected,
     AdaptiveBalancedRejected,
     AdaptiveSpeedRejected,
-    AdaptiveUnknownPreference
+    AdaptiveUnknownPreference,
+    BalancedDeadlineColdStart,
+    BalancedDeadlineCurrentWithinDeadline,
+    BalancedDeadlineSwitched,
+    BalancedDeadlineNoFeasibleCandidate,
+    BalancedCountdownExpired
 }
 
 public sealed record RouteDecision(
@@ -266,11 +271,13 @@ public sealed record RouteDecision(
     public TaskDurationCategory? DurationCategory { get; init; }
     public double? CurrentIntervalSeconds { get; init; }
     public AdaptiveSwitchDecision? AdaptiveDecision { get; init; }
+    public BalancedDeadlineDecision? BalancedDeadlineDecision { get; init; }
     public IReadOnlyList<AdaptiveCandidateRanking> AdaptiveRankings { get; init; } = [];
     public string Detail { get; init; } = string.Empty;
 }
 
 public sealed record AdaptiveCandidateRanking(
+    string ProviderId,
     long GroupId,
     int? Rank,
     bool Accepted,
@@ -281,7 +288,9 @@ public sealed record AdaptiveCandidateRanking(
 public sealed record AdaptiveRoutingContext(
     RoutingMode BaseMode,
     TaskDurationCategory DurationCategory,
-    double? CurrentIntervalSeconds);
+    double? CurrentIntervalSeconds,
+    double? BalancedRemainingSeconds = null,
+    double? BalancedDeadlineSoftSeconds = null);
 
 public sealed record RouteState
 {
