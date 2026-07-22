@@ -1,4 +1,5 @@
 using AIHubRouter.Core;
+using AIHubRouter.Core.Tests;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -7,6 +8,7 @@ var tests = new (string Name, Action Body)[]
 {
     ("Bearer token normalization", TestBearerNormalization),
     ("Token extraction from cookie", TestCookieTokenExtraction),
+    ("Test catalog rejects duplicate names", TestCatalogRejectsDuplicateNames),
     ("Lowest available authorized group", TestLowestAvailableGroup),
     ("User rate override", TestUserRateOverride),
     ("Availability threshold", TestAvailabilityThreshold),
@@ -140,6 +142,22 @@ if (Environment.GetEnvironmentVariable("AIHUB_SMOKE_TEST") == "1")
 }
 
 return failures == 0 ? 0 : 1;
+
+static void TestCatalogRejectsDuplicateNames()
+{
+    try
+    {
+        TestCatalog.Create(
+            new TestCase("duplicate", static () => { }),
+            new TestCase("duplicate", static () => { }));
+        throw new InvalidOperationException("Duplicate test names were accepted.");
+    }
+    catch (InvalidOperationException exception)
+    {
+        Assert(exception.Message == "Duplicate test name: duplicate.",
+            "Duplicate test names did not report the expected error.");
+    }
+}
 
 static void TestBearerNormalization()
 {
