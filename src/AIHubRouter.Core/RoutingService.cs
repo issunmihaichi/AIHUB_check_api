@@ -36,6 +36,7 @@ public sealed class RoutingService : IDisposable
     private readonly IAIHubClientFactory _clientFactory;
     private readonly Func<PersistentCredentials, CancellationToken, Task>? _persistCredentials;
     private readonly Func<DateTimeOffset> _utcNow;
+    private readonly ProviderMetricsRollingWindow _providerMetrics;
     private PersistentCredentials _credentials;
     private AuthSession? _currentSession;
     private IAIHubApiClient? _sessionClient;
@@ -52,7 +53,8 @@ public sealed class RoutingService : IDisposable
         IRouteStateStore stateStore,
         IAIHubClientFactory? clientFactory = null,
         Func<PersistentCredentials, CancellationToken, Task>? persistCredentials = null,
-        Func<DateTimeOffset>? utcNow = null)
+        Func<DateTimeOffset>? utcNow = null,
+        ProviderMetricsRollingWindow? providerMetrics = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _credentials = credentials ?? throw new ArgumentNullException(nameof(credentials));
@@ -60,6 +62,7 @@ public sealed class RoutingService : IDisposable
         _clientFactory = clientFactory ?? new AIHubClientFactory();
         _persistCredentials = persistCredentials;
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
+        _providerMetrics = providerMetrics ?? new ProviderMetricsRollingWindow();
 
         if (!string.IsNullOrWhiteSpace(credentials.BearerToken) ||
             !string.IsNullOrWhiteSpace(credentials.RefreshToken))
@@ -116,6 +119,7 @@ public sealed class RoutingService : IDisposable
         }
 
         var summary = await summaryTask;
+        var metrics = _providerMetrics.Observe(now, summary.Apis, _cachedRates);
         var selectedKeys = ResolveSelectedKeys(_cachedKeys);
         if (selectedKeys.Count == 0)
         {
@@ -129,9 +133,9 @@ public sealed class RoutingService : IDisposable
             ? Math.Max(0, (countdownEnd - now).TotalSeconds)
             : (double?)null;
         var snapshot = RouteDecisionCoordinator.Evaluate(
-            summary.Apis,
+            metrics.Providers,
             _cachedGroups,
-            _cachedRates,
+            metrics.UserGroupRates,
             basePolicy,
             _settings.DurationCategory,
             state,
@@ -202,9 +206,9 @@ public sealed class RoutingService : IDisposable
         return new RoutingCycleResult(
             decisionResult.Decision,
             evaluation,
-            summary.Apis,
+            metrics.Providers,
             _cachedGroups,
-            _cachedRates,
+            metrics.UserGroupRates,
             _cachedKeys,
             selectedKeys.Select(key => key.Id).ToArray(),
             keyResults,

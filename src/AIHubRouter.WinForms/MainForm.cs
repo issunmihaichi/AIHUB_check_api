@@ -20,10 +20,12 @@ internal sealed partial class MainForm : Form
     private HashSet<long> _savedSelectedKeyIds = [];
     private AuthSession? _currentSession;
     private RoutingService? _routingService;
+    private readonly ProviderMetricsRollingWindow _providerMetrics = new();
     private RouteEvaluation? _lastEvaluation;
     private WinFormsTheme _themePreference = WinFormsTheme.System;
     private MonitorSummary? _summary;
     private IReadOnlyList<GroupInfo> _groups = [];
+    private IReadOnlyDictionary<long, double> _rawUserRates = new Dictionary<long, double>();
     private IReadOnlyDictionary<long, double> _userRates = new Dictionary<long, double>();
     private IReadOnlyList<AdaptiveCandidateRanking> _adaptiveRankings = [];
     private RouteCandidate? _bestCandidate;
@@ -96,12 +98,11 @@ internal sealed partial class MainForm : Form
         {
             if (!_applyingSessionCredentials)
             {
-                _currentSession = null;
-                InvalidateRoutingService();
+                ResetAuthenticationAndRoutingService();
             }
         };
-        _cookieText.TextChanged += (_, _) => InvalidateRoutingService();
-        _userAgentText.TextChanged += (_, _) => InvalidateRoutingService();
+        _cookieText.TextChanged += (_, _) => ResetAuthenticationAndRoutingService();
+        _userAgentText.TextChanged += (_, _) => ResetAuthenticationAndRoutingService();
         _platformCombo.SelectedIndexChanged += (_, _) =>
         {
             InvalidateRoutingService();
@@ -232,7 +233,7 @@ internal sealed partial class MainForm : Form
         bool loadAccountData,
         CancellationToken cancellationToken)
     {
-        _summary = await client.GetProviderSummaryAsync(cancellationToken);
+        var rawSummary = await client.GetProviderSummaryAsync(cancellationToken);
 
         if (loadAccountData)
         {
@@ -242,9 +243,18 @@ internal sealed partial class MainForm : Form
             await Task.WhenAll(groupsTask, ratesTask, keysTask);
 
             _groups = await groupsTask;
-            _userRates = await ratesTask;
+            _rawUserRates = await ratesTask;
             ApplyKeys(await keysTask);
         }
+
+        var metrics = _providerMetrics.Observe(DateTimeOffset.UtcNow, rawSummary.Apis, _rawUserRates);
+        _summary = new MonitorSummary
+        {
+            Apis = metrics.Providers.ToList(),
+            GeneratedAt = rawSummary.GeneratedAt,
+            MonitoringActive = rawSummary.MonitoringActive
+        };
+        _userRates = metrics.UserGroupRates;
 
         RecalculateCandidate();
     }
@@ -303,7 +313,8 @@ internal sealed partial class MainForm : Form
             settings,
             credentials,
             new JsonRouteStateStore(storageDirectory),
-            persistCredentials: PersistRoutingCredentialsAsync);
+            persistCredentials: PersistRoutingCredentialsAsync,
+            providerMetrics: _providerMetrics);
         return _routingService;
     }
 
@@ -600,6 +611,7 @@ internal sealed partial class MainForm : Form
     private void ResetAuthenticationAndRoutingService()
     {
         _currentSession = null;
+        _providerMetrics.Clear();
         InvalidateRoutingService();
     }
 
