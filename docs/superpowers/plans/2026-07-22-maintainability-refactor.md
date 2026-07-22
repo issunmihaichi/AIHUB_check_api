@@ -162,6 +162,7 @@
       new("Bearer token normalization", CoreTestCases.TestBearerNormalization),
       new("Token extraction from cookie", CoreTestCases.TestCookieTokenExtraction),
       new("Test catalog rejects duplicate names", CoreTestCases.TestCatalogRejectsDuplicateNames),
+      new("Test catalog snapshots input", CoreTestCases.TestCatalogSnapshotsInput),
       new("Lowest available authorized group", CoreTestCases.TestLowestAvailableGroup),
       new("User rate override", CoreTestCases.TestUserRateOverride),
       new("Availability threshold", CoreTestCases.TestAvailabilityThreshold),
@@ -263,7 +264,7 @@
       new("Initialized empty key selection stays empty", CoreTestCases.TestInitializedEmptyKeySelectionStaysEmpty));
   ```
 
-  Do not add, remove, rename, or reorder the existing test cases other than inserting the catalog characterization test from Task 1.
+  Do not add, remove, rename, or reorder the existing test cases other than inserting both catalog characterization tests from Task 1.
 
 - [ ] **Step 5: Verify the test runner refactor.**
 
