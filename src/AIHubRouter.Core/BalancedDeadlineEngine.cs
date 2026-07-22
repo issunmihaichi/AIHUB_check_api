@@ -5,6 +5,7 @@ public enum BalancedDeadlineDecisionReason
     CurrentWithinDeadline,
     ColdStart,
     SwitchedAfterDeadline,
+    FastestFallback,
     NoFeasibleCandidate
 }
 
@@ -148,7 +149,8 @@ public static class BalancedDeadlineEngine
             ? SelectCheapestFeasible(feasible, outputTokens)
             : SelectLowestCostFeasible(feasible, request.Current, outputTokens);
 
-        if (target is null && !isColdStart)
+        var usedFastestFallback = target is null;
+        if (usedFastestFallback)
         {
             target = alternatives
                 .OrderBy(candidate => CalculateCompletionSeconds(candidate, outputTokens))
@@ -176,19 +178,21 @@ public static class BalancedDeadlineEngine
         return new BalancedDeadlineDecision(
             switched,
             switched ? target : request.Current,
-            isColdStart
-                ? BalancedDeadlineDecisionReason.ColdStart
-                : target is { } selected && CalculateCompletionSeconds(selected, outputTokens) <= effectiveDeadlineSeconds
-                    ? BalancedDeadlineDecisionReason.SwitchedAfterDeadline
-                    : BalancedDeadlineDecisionReason.NoFeasibleCandidate,
+            usedFastestFallback
+                ? BalancedDeadlineDecisionReason.FastestFallback
+                : isColdStart
+                    ? BalancedDeadlineDecisionReason.ColdStart
+                    : BalancedDeadlineDecisionReason.SwitchedAfterDeadline,
             isColdStart,
             outputTokens,
             currentCompletion,
             CalculateCompletionSeconds(target, outputTokens),
             CalculateSwitchCost(target, outputTokens),
-            isColdStart
-                ? "Cold start selected the cheapest feasible node."
-                : $"Current node exceeded {deadlineSeconds:0.##}s; selected the lowest-cost node within {effectiveDeadlineSeconds:0.##}s.");
+            usedFastestFallback
+                ? $"No node can meet {effectiveDeadlineSeconds:0.##}s; selected the fastest alternative."
+                : isColdStart
+                    ? "Cold start selected the cheapest feasible node."
+                    : $"Current node exceeded {deadlineSeconds:0.##}s; selected the lowest-cost node within {effectiveDeadlineSeconds:0.##}s.");
     }
 
     private static RouteCandidate? SelectCheapestFeasible(

@@ -37,6 +37,7 @@ internal static class TestCatalog
         new TestCase("Balanced deadline keeps current feasible node", CoreTestCases.TestBalancedDeadlineKeepsCurrentNode),
         new TestCase("Balanced deadline switches to cheapest feasible node", CoreTestCases.TestBalancedDeadlineChoosesCheapestFeasibleNode),
         new TestCase("Balanced deadline cold start chooses cheapest feasible node", CoreTestCases.TestBalancedDeadlineColdStart),
+        new TestCase("Balanced deadline cold start falls back to fastest route", CoreTestCases.TestBalancedDeadlineColdStartFallsBackToFastestRoute),
         new TestCase("Balanced deadline honors user soft tolerance", CoreTestCases.TestBalancedDeadlineHonorsSoftTolerance),
         new TestCase("Balanced deadline zero falls back to economy", CoreTestCases.TestBalancedDeadlineZeroFallsBackToEconomy),
         new TestCase("Balanced deadline uses conservative performance", CoreTestCases.TestBalancedDeadlineUsesConservativePerformance),

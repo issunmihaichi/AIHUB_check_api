@@ -19,7 +19,7 @@ The state is persisted in `route-state.json`. Existing installations without the
 ## Mode Rules
 
 - Economy remains Economy even when calls are less than five seconds apart. It chooses the lowest effective multiplier among eligible groups.
-- Balanced retains the countdown and user soft tolerance. Completion estimates use `P90(TTFT) + output budget / P25(output rate)`. A current route meeting the hard deadline is retained. When it cannot meet the hard deadline, the lowest-cost feasible route is selected immediately.
+- Balanced retains the countdown and user soft tolerance. Completion estimates use `P90(TTFT) + output budget / P25(output rate)`. A current route meeting the hard deadline is retained. When it cannot meet the hard deadline, the lowest-cost feasible route is selected immediately. If no route meets the soft deadline, both continuous and cold-start flows select the fastest alternative.
 - Speed retains the 20 percent generation-speed improvement with a 10 percent price cap, or a 30-second end-to-end gain at no price increase. A node with 1-19 locally observed performance samples cannot win solely because it appears faster.
 
 ## Performance Window

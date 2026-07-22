@@ -264,6 +264,7 @@ public enum RouteDecisionReason
     BalancedDeadlineColdStart,
     BalancedDeadlineCurrentWithinDeadline,
     BalancedDeadlineSwitched,
+    BalancedDeadlineFastestFallback,
     BalancedDeadlineNoFeasibleCandidate,
     BalancedCountdownExpired,
     PolicySwitchCoolingDown,
