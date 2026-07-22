@@ -167,7 +167,12 @@ internal sealed partial class MainForm
                     : groupId is { } currentGroupId && currentGroupId == result.Decision.Current?.Group.Id ? "当前"
                     : groupId is { } baselineGroupId && baselineGroupId == result.Evaluation.Baseline?.Group.Id ? "最低价"
                     : string.Empty;
-                if (!hasCandidate)
+                var group = groupId is { } routeGroupId && groupLookup.TryGetValue(routeGroupId, out var foundGroup)
+                    ? foundGroup
+                    : null;
+                var blockReason = _providerBlocklist.GetBlockingReason(provider, group);
+                var isBlocked = blockReason != ProviderBlockReason.None;
+                if (!hasCandidate || isBlocked)
                 {
                     decisionState = string.Empty;
                 }
@@ -180,8 +185,8 @@ internal sealed partial class MainForm
                     hasOverride = candidate.HasUserRateOverride;
                 }
 
-                var isAuthorized = groupId is { } authorizedGroupId && groupLookup.ContainsKey(authorizedGroupId);
-                var isRoutable = ProviderStatusPresentation.IsRoutable(
+                var isAuthorized = group is not null;
+                var isRoutable = !isBlocked && ProviderStatusPresentation.IsRoutable(
                     provider,
                     hasAccountData: true,
                     isAuthorized,
@@ -194,14 +199,16 @@ internal sealed partial class MainForm
                 {
                     Source = provider,
                     IsRoutable = isRoutable,
-                    IsBest = provider.Id == result.Decision.Target?.Provider.Id,
+                    IsBest = !isBlocked && provider.Id == result.Decision.Target?.Provider.Id,
+                    IsBlocked = isBlocked,
                     EffectiveRate = effective,
                     WeightedScore = score,
                     WeightedScoreValue = scoreValue,
                     AdaptiveRank = adaptiveRank,
                     AdaptiveRankValue = adaptiveRankValue,
                     DecisionState = decisionState,
-                    State = ProviderStatusPresentation.ResolveRoutingState(
+                    BlockStatus = BlockReasonText(blockReason),
+                    State = isBlocked ? "已拉黑" : ProviderStatusPresentation.ResolveRoutingState(
                         provider,
                         hasAccountData: true,
                         isAuthorized,
@@ -212,6 +219,7 @@ internal sealed partial class MainForm
                 };
             })
             .OrderByDescending(row => row.IsRoutable)
+            .ThenBy(row => row.IsBlocked)
             .ThenBy(row => row.AdaptiveRankValue)
             .ThenByDescending(row => row.IsBest)
             .ThenByDescending(row => row.WeightedScoreValue)
@@ -371,7 +379,8 @@ internal sealed partial class MainForm
         var criteria = new RoutingCriteria(
             platform,
             (double)_minimumSuccessInput.Value / 100,
-            TimeSpan.FromMinutes(15));
+            TimeSpan.FromMinutes(15),
+            _providerBlocklist);
 
         var now = DateTimeOffset.UtcNow;
         var selectedGroupIds = CurrentKeyRows()
@@ -396,7 +405,8 @@ internal sealed partial class MainForm
             Platform = platform,
             Mode = CurrentRoutingMode(),
             MinimumSuccessRate6h = criteria.MinimumSuccessRate6h,
-            MaximumStatusAge = criteria.MaximumStatusAge
+            MaximumStatusAge = criteria.MaximumStatusAge,
+            Blocklist = _providerBlocklist
         };
         var snapshot = RouteDecisionCoordinator.Evaluate(
             _summary.Apis,
@@ -453,7 +463,12 @@ internal sealed partial class MainForm
             .Where(provider => provider.Platform.Equals(criteria.Platform, StringComparison.OrdinalIgnoreCase))
             .Select(provider =>
             {
-                var isAuthorized = provider.GroupId is { } groupId && groups.ContainsKey(groupId);
+                var group = provider.GroupId is { } groupId && groups.TryGetValue(groupId, out var foundGroup)
+                    ? foundGroup
+                    : null;
+                var isAuthorized = group is not null;
+                var blockReason = (criteria.Blocklist ?? ProviderBlocklist.Empty).GetBlockingReason(provider, group);
+                var isBlocked = blockReason != ProviderBlockReason.None;
                 var overrideRate = 0d;
                 var hasOverride = provider.GroupId is { } id && _userRates.TryGetValue(id, out overrideRate);
                 var effectiveRate = hasOverride ? overrideRate : provider.PriceMultiplier;
@@ -470,7 +485,7 @@ internal sealed partial class MainForm
                     out candidateScore);
                 var score = hasScore ? candidateScore.ToString("0.###") : "-";
                 var scoreValue = hasScore ? candidateScore : double.NegativeInfinity;
-                var isRoutable = ProviderStatusPresentation.IsRoutable(
+                var isRoutable = !isBlocked && ProviderStatusPresentation.IsRoutable(
                     provider,
                     hasAccountData: _groups.Count > 0,
                     isAuthorized,
@@ -482,7 +497,8 @@ internal sealed partial class MainForm
                 {
                     Source = provider,
                     IsRoutable = isRoutable,
-                    IsBest = _bestCandidate?.Provider.Id == provider.Id,
+                    IsBest = !isBlocked && _bestCandidate?.Provider.Id == provider.Id,
+                    IsBlocked = isBlocked,
                     EffectiveRate = hasOverride ? $"{effectiveRate:0.####} *" : $"{effectiveRate:0.####}",
                     WeightedScore = score,
                     WeightedScoreValue = scoreValue,
@@ -493,7 +509,8 @@ internal sealed partial class MainForm
                         : hasCandidate && provider.GroupId is { } baselineGroupId &&
                             baselineGroupId == _lastEvaluation?.Baseline?.Group.Id ? "最低价"
                         : string.Empty,
-                    State = ProviderStatusPresentation.ResolveRoutingState(
+                    BlockStatus = BlockReasonText(blockReason),
+                    State = isBlocked ? "已拉黑" : ProviderStatusPresentation.ResolveRoutingState(
                         provider,
                         hasAccountData: _groups.Count > 0,
                         isAuthorized: isAuthorized,
@@ -504,6 +521,7 @@ internal sealed partial class MainForm
                 };
             })
             .OrderByDescending(row => row.IsRoutable)
+            .ThenBy(row => row.IsBlocked)
             .ThenBy(row => row.AdaptiveRankValue)
             .ThenByDescending(row => row.IsBest)
             .ThenBy(row => row.Source.PriceMultiplier)

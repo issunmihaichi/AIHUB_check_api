@@ -23,6 +23,8 @@ public sealed class PersistentAppSettings
     public WinFormsTheme Theme { get; init; } = WinFormsTheme.System;
     public bool KeySelectionInitialized { get; init; }
     public long[] SelectedKeyIds { get; init; } = [];
+    public long[] BlockedGroupIds { get; init; } = [];
+    public string[] BlockedNodePatterns { get; init; } = [];
 
     public BalancedRoutingPolicy CreatePolicy()
     {
@@ -31,7 +33,8 @@ public sealed class PersistentAppSettings
             Platform = string.IsNullOrWhiteSpace(Platform) ? "openai" : Platform,
             Mode = RoutingMode,
             MinimumSuccessRate6h = Math.Clamp(MinimumSuccessPercent, 0, 100) / 100d,
-            MaximumStatusAge = TimeSpan.FromMinutes(15)
+            MaximumStatusAge = TimeSpan.FromMinutes(15),
+            Blocklist = new ProviderBlocklist(BlockedGroupIds, BlockedNodePatterns)
         };
     }
 }

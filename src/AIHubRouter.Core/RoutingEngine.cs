@@ -18,10 +18,12 @@ public static class RoutingEngine
             .Where(group => group.Status.Equals("active", StringComparison.OrdinalIgnoreCase))
             .Where(group => group.Platform.Equals(criteria.Platform, StringComparison.OrdinalIgnoreCase))
             .ToDictionary(group => group.Id);
+        var blocklist = criteria.Blocklist ?? ProviderBlocklist.Empty;
 
         return providers
             .Where(provider => provider.Enabled && provider.Available)
             .Where(provider => provider.GroupId is > 0 && groups.ContainsKey(provider.GroupId.Value))
+            .Where(provider => !blocklist.IsBlocked(provider, groups[provider.GroupId!.Value]))
             .Where(provider => provider.Platform.Equals(criteria.Platform, StringComparison.OrdinalIgnoreCase))
             .Where(provider => provider.PriceMultiplier >= 0 && double.IsFinite(provider.PriceMultiplier))
             .Where(provider => IsFresh(provider.CheckedAt, now, criteria.MaximumStatusAge))
@@ -65,10 +67,12 @@ public static class RoutingEngine
             .Where(group => group.Platform.Equals(policy.Platform, StringComparison.OrdinalIgnoreCase))
             .GroupBy(group => group.Id)
             .ToDictionary(group => group.Key, group => group.First());
+        var blocklist = policy.Blocklist ?? ProviderBlocklist.Empty;
 
         var eligible = providers
             .Where(provider => provider.Enabled && provider.Available)
             .Where(provider => provider.GroupId is > 0 && groups.ContainsKey(provider.GroupId.Value))
+            .Where(provider => !blocklist.IsBlocked(provider, groups[provider.GroupId!.Value]))
             .Where(provider => provider.Platform.Equals(policy.Platform, StringComparison.OrdinalIgnoreCase))
             .Where(provider => provider.PriceMultiplier >= 0 && double.IsFinite(provider.PriceMultiplier))
             .Where(provider => IsFresh(provider.CheckedAt, now, policy.MaximumStatusAge))

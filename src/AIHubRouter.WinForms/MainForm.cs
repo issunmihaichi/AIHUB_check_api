@@ -29,6 +29,7 @@ internal sealed partial class MainForm : Form
     private IReadOnlyDictionary<long, double> _userRates = new Dictionary<long, double>();
     private IReadOnlyList<AdaptiveCandidateRanking> _adaptiveRankings = [];
     private RouteCandidate? _bestCandidate;
+    private ProviderBlocklist _providerBlocklist = ProviderBlocklist.Empty;
     private double _balancedCountdownSeconds = 7_200;
     private double _balancedDeadlineSoftSeconds = BalancedDeadlineEngine.DefaultSoftDeadlineSeconds;
     private double _balancedExpectedOutputTokens = 1_000;
@@ -64,6 +65,7 @@ internal sealed partial class MainForm : Form
             _routingService?.Dispose();
             _shutdown.Cancel();
             _toolTip.Dispose();
+            _providerContextMenu.Dispose();
         };
         _authGuideButton.Click += (_, _) => ShowAuthenticationGuide();
         _openLoginButton.Click += (_, _) => OpenLoginPage();
@@ -72,6 +74,7 @@ internal sealed partial class MainForm : Form
         _pasteUserAgentButton.Click += (_, _) => PasteCredential(_userAgentText, "User-Agent");
         _resetBaseUrlButton.Click += (_, _) => _baseUrlText.Text = "https://aihub.top";
         _saveSettingsButton.Click += (_, _) => SaveCurrentSettings(showStatus: true);
+        _manageBlocklistButton.Click += (_, _) => ShowBlocklistDialog();
         _persistCredentialsCheck.CheckedChanged += (_, _) => HandlePersistenceChanged();
         _validateButton.Click += async (_, _) => await ValidateAuthenticationAsync();
         _refreshButton.Click += async (_, _) =>

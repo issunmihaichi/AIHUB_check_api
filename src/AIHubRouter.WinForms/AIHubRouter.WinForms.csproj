@@ -14,7 +14,7 @@
     <RootNamespace>AIHubRouter.WinForms</RootNamespace>
     <Product>AIHub Lowest Price Router</Product>
     <Description>Windows desktop router for AIHub provider groups.</Description>
-    <Version>1.1.10</Version>
+    <Version>1.1.11</Version>
     <Deterministic>true</Deterministic>
     <PathMap>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..\..'))=/_/</PathMap>
   </PropertyGroup>
