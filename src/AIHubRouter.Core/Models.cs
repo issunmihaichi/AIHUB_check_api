@@ -52,6 +52,15 @@ public sealed class ProviderStatus
     [JsonPropertyName("outputTokensPerSecond")]
     public double? OutputTokensPerSecond { get; init; }
 
+    [JsonIgnore]
+    public double? FirstTokenLatencyP90Ms { get; init; }
+
+    [JsonIgnore]
+    public double? OutputTokensPerSecondP25 { get; init; }
+
+    [JsonIgnore]
+    public int PerformanceSampleCount { get; init; }
+
     [JsonPropertyName("successRates")]
     public Dictionary<string, double> SuccessRates { get; init; } = [];
 
@@ -250,12 +259,24 @@ public enum RouteDecisionReason
     AdaptiveCostRejected,
     AdaptiveBalancedRejected,
     AdaptiveSpeedRejected,
+    AdaptiveSpeedInsufficientEvidence,
     AdaptiveUnknownPreference,
     BalancedDeadlineColdStart,
     BalancedDeadlineCurrentWithinDeadline,
     BalancedDeadlineSwitched,
     BalancedDeadlineNoFeasibleCandidate,
-    BalancedCountdownExpired
+    BalancedCountdownExpired,
+    PolicySwitchCoolingDown,
+    PolicySwitchAwaitingEvaluations,
+    PolicyCandidateNotStable
+}
+
+public enum RouteSwitchClass
+{
+    None,
+    Initial,
+    ForcedRecovery,
+    Policy
 }
 
 public sealed record RouteDecision(
@@ -273,6 +294,7 @@ public sealed record RouteDecision(
     public AdaptiveSwitchDecision? AdaptiveDecision { get; init; }
     public BalancedDeadlineDecision? BalancedDeadlineDecision { get; init; }
     public IReadOnlyList<AdaptiveCandidateRanking> AdaptiveRankings { get; init; } = [];
+    public RouteSwitchClass SwitchClass { get; init; }
     public string Detail { get; init; } = string.Empty;
 }
 
@@ -296,4 +318,8 @@ public sealed record AdaptiveRoutingContext(
 public sealed record RouteState
 {
     public long? CurrentGroupId { get; init; }
+    public DateTimeOffset? LastPolicySwitchAt { get; init; }
+    public int CompletedPolicyEvaluationsSinceLastSwitch { get; init; }
+    public long? PendingPolicyTargetGroupId { get; init; }
+    public int PendingPolicyTargetObservations { get; init; }
 }

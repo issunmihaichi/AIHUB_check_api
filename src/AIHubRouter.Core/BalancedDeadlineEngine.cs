@@ -44,11 +44,13 @@ public static class BalancedDeadlineEngine
             return double.PositiveInfinity;
         }
 
-        var ttftSeconds = candidate.Provider.FirstTokenLatencyMs is { } latency &&
+        var latencyMs = candidate.Provider.FirstTokenLatencyP90Ms ?? candidate.Provider.FirstTokenLatencyMs;
+        var ttftSeconds = latencyMs is { } latency &&
             double.IsFinite(latency) && latency >= 0
                 ? latency / 1_000
                 : double.PositiveInfinity;
-        var generationSpeed = candidate.Provider.OutputTokensPerSecond;
+        var generationSpeed = candidate.Provider.OutputTokensPerSecondP25 ??
+            candidate.Provider.OutputTokensPerSecond;
         if (!double.IsFinite(ttftSeconds) ||
             generationSpeed is not { } speed ||
             !double.IsFinite(speed) ||

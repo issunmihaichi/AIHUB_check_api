@@ -9,7 +9,12 @@ public sealed record RouteAuditCandidate(
     double Multiplier,
     double? LatencyMs,
     double Score,
-    bool Recommended);
+    bool Recommended)
+{
+    public double? LatencyP90Ms { get; init; }
+    public double? OutputRateP25 { get; init; }
+    public int PerformanceSampleCount { get; init; }
+}
 
 public sealed record RouteAuditKey(
     long KeyId,
@@ -41,6 +46,11 @@ public sealed record RouteAuditEntry(
     public double? BalancedCurrentCompletionSeconds { get; init; }
     public double? BalancedTargetCompletionSeconds { get; init; }
     public double? BalancedTargetCostUsd { get; init; }
+    public RouteSwitchClass SwitchClass { get; init; }
+    public DateTimeOffset? LastPolicySwitchAt { get; init; }
+    public int? CompletedPolicyEvaluationsSinceLastSwitch { get; init; }
+    public long? PendingPolicyTargetGroupId { get; init; }
+    public int? PendingPolicyTargetObservations { get; init; }
 }
 
 public sealed class AuditLogWriter
@@ -83,10 +93,16 @@ public sealed class AuditLogWriter
             BalancedCurrentCompletionSeconds = NormalizeNonNegative(entry.BalancedCurrentCompletionSeconds),
             BalancedTargetCompletionSeconds = NormalizeNonNegative(entry.BalancedTargetCompletionSeconds),
             BalancedTargetCostUsd = NormalizeNonNegative(entry.BalancedTargetCostUsd),
+            CompletedPolicyEvaluationsSinceLastSwitch = NormalizeNonNegative(
+                entry.CompletedPolicyEvaluationsSinceLastSwitch),
+            PendingPolicyTargetObservations = NormalizeNonNegative(entry.PendingPolicyTargetObservations),
             Candidates = entry.Candidates.Select(candidate => candidate with
             {
                 Multiplier = NormalizeFinite(candidate.Multiplier),
                 LatencyMs = NormalizeLatency(candidate.LatencyMs),
+                LatencyP90Ms = NormalizeLatency(candidate.LatencyP90Ms),
+                OutputRateP25 = NormalizeNonNegative(candidate.OutputRateP25),
+                PerformanceSampleCount = Math.Max(0, candidate.PerformanceSampleCount),
                 Score = NormalizeFinite(candidate.Score)
             }).ToArray()
         };
@@ -122,6 +138,9 @@ public sealed class AuditLogWriter
 
     private static double? NormalizeLatency(double? value) =>
         value is { } latency && double.IsFinite(latency) && latency >= 0 ? latency : null;
+
+    private static int? NormalizeNonNegative(int? value) =>
+        value is { } number && number >= 0 ? number : null;
 
     private void RotateIfNeeded(int incomingBytes)
     {

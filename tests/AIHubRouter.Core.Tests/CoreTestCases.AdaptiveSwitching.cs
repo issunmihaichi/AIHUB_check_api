@@ -25,8 +25,8 @@ internal static partial class CoreTestCases
 
     internal static void TestAdaptivePreferenceBoundaries()
     {
-        Assert(AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(4.999, AdaptivePreference.Cost) == AdaptivePreference.Speed,
-            "An interval below five seconds did not force Speed.");
+        Assert(AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(4.999, AdaptivePreference.Cost) == AdaptivePreference.Cost,
+            "An interval below five seconds overrode the user's Economy preference.");
         Assert(AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(5, AdaptivePreference.Cost) == AdaptivePreference.Cost,
             "The inclusive five-second boundary did not retain the base preference.");
         Assert(AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(15, AdaptivePreference.Balanced) == AdaptivePreference.Balanced,
@@ -159,6 +159,19 @@ internal static partial class CoreTestCases
 
         Assert(accepted.ShouldSwitch, "Speed mode rejected an end-to-end gain above thirty seconds.");
         Assert(!exactBoundary.ShouldSwitch, "Speed mode accepted the strict thirty-second boundary.");
+    }
+
+    internal static void TestAdaptiveSpeedNeedsReliablePerformanceSamples()
+    {
+        var result = AdaptiveSwitchDecisionEngine.Decide(new AdaptiveSwitchRequest(
+            0.02, 0.02, 1, 1, 20, 30,
+            TaskDurationCategory.Medium, AdaptivePreference.Speed, 2,
+            OldPerformanceSampleCount: 20,
+            NewPerformanceSampleCount: 19));
+
+        Assert(!result.ShouldSwitch &&
+            result.Reason == AdaptiveDecisionReason.InsufficientPerformanceEvidence,
+            "Speed mode upgraded to a candidate with insufficient performance evidence.");
     }
 
     internal static void TestAdaptiveShortTaskProtection()
@@ -380,6 +393,134 @@ internal static partial class CoreTestCases
             "Initial routing was blocked by pairwise safeguards.");
         Assert(invalid.Decision.ShouldSwitch && invalid.Decision.Reason == RouteDecisionReason.CurrentRouteInvalid,
             "Invalid-route recovery was blocked by pairwise safeguards.");
+    }
+
+    internal static void TestPolicySwitchNeedsStableCandidate()
+    {
+        var now = DateTimeOffset.Parse("2026-07-22T12:00:00Z");
+        var evaluation = RoutingEngine.Evaluate(
+            [
+                Provider(1, 0.01, true, 0.99, now, 1_000, outputTps: 50),
+                Provider(2, 0.05, true, 0.99, now, 1_000, outputTps: 50)
+            ],
+            [Group(1), Group(2)],
+            new Dictionary<long, double>(),
+            Policy(RoutingMode.Economy),
+            now);
+        var state = new RouteState
+        {
+            CurrentGroupId = 2,
+            LastPolicySwitchAt = now.AddMinutes(-1),
+            CompletedPolicyEvaluationsSinceLastSwitch = 6,
+            PendingPolicyTargetGroupId = 1,
+            PendingPolicyTargetObservations = 1
+        };
+
+        var first = RouteDecisionEngine.Decide(
+            evaluation,
+            state,
+            Policy(RoutingMode.Economy),
+            new AdaptiveRoutingContext(RoutingMode.Economy, TaskDurationCategory.Short, 31),
+            now,
+            observedCurrentGroupId: 2);
+        Assert(!first.Decision.ShouldSwitch &&
+            first.Decision.Reason == RouteDecisionReason.PolicyCandidateNotStable,
+            "A policy switch ignored the required second stable observation.");
+        Assert(first.NextState.PendingPolicyTargetGroupId == 1 &&
+            first.NextState.PendingPolicyTargetObservations == 2,
+            "The first policy observation was not persisted for the next routing cycle.");
+
+        var second = RouteDecisionEngine.Decide(
+            evaluation,
+            first.NextState,
+            Policy(RoutingMode.Economy),
+            new AdaptiveRoutingContext(RoutingMode.Economy, TaskDurationCategory.Short, 31),
+            now.AddSeconds(1),
+            observedCurrentGroupId: 2);
+        Assert(second.Decision.ShouldSwitch && second.Decision.Target?.Group.Id == 1 &&
+            second.Decision.SwitchClass == RouteSwitchClass.Policy,
+            "A stable policy candidate did not switch after the hysteresis gates were satisfied.");
+    }
+
+    internal static void TestPolicySwitchRequiresDwellAndCompletedEvaluations()
+    {
+        var now = DateTimeOffset.Parse("2026-07-22T12:00:00Z");
+        var evaluation = RoutingEngine.Evaluate(
+            [
+                Provider(1, 0.01, true, 0.99, now, 1_000, outputTps: 50),
+                Provider(2, 0.05, true, 0.99, now, 1_000, outputTps: 50)
+            ],
+            [Group(1), Group(2)],
+            new Dictionary<long, double>(),
+            Policy(RoutingMode.Economy),
+            now);
+
+        var dwellBlocked = RouteDecisionEngine.Decide(
+            evaluation,
+            new RouteState
+            {
+                CurrentGroupId = 2,
+                LastPolicySwitchAt = now.AddSeconds(-29),
+                CompletedPolicyEvaluationsSinceLastSwitch = 6,
+                PendingPolicyTargetGroupId = 1,
+                PendingPolicyTargetObservations = 2
+            },
+            Policy(RoutingMode.Economy),
+            new AdaptiveRoutingContext(RoutingMode.Economy, TaskDurationCategory.Short, 31),
+            now,
+            observedCurrentGroupId: 2);
+        Assert(!dwellBlocked.Decision.ShouldSwitch &&
+            dwellBlocked.Decision.Reason == RouteDecisionReason.PolicySwitchCoolingDown,
+            "A policy switch bypassed the 30-second dwell period.");
+
+        var countBlocked = RouteDecisionEngine.Decide(
+            evaluation,
+            new RouteState
+            {
+                CurrentGroupId = 2,
+                LastPolicySwitchAt = now.AddMinutes(-1),
+                CompletedPolicyEvaluationsSinceLastSwitch = 5,
+                PendingPolicyTargetGroupId = 1,
+                PendingPolicyTargetObservations = 2
+            },
+            Policy(RoutingMode.Economy),
+            new AdaptiveRoutingContext(RoutingMode.Economy, TaskDurationCategory.Short, 31),
+            now,
+            observedCurrentGroupId: 2);
+        Assert(!countBlocked.Decision.ShouldSwitch &&
+            countBlocked.Decision.Reason == RouteDecisionReason.PolicySwitchAwaitingEvaluations,
+            "A policy switch bypassed the completed-evaluation gate.");
+    }
+
+    internal static void TestForcedRecoveryBypassesPolicyHysteresis()
+    {
+        var now = DateTimeOffset.Parse("2026-07-22T12:00:00Z");
+        var evaluation = RoutingEngine.Evaluate(
+            [Provider(2, 0.02, true, 0.99, now, 1_000, outputTps: 50)],
+            [Group(2)],
+            new Dictionary<long, double>(),
+            Policy(RoutingMode.Economy),
+            now);
+
+        var result = RouteDecisionEngine.Decide(
+            evaluation,
+            new RouteState
+            {
+                CurrentGroupId = 1,
+                LastPolicySwitchAt = now,
+                CompletedPolicyEvaluationsSinceLastSwitch = 0,
+                PendingPolicyTargetGroupId = 2,
+                PendingPolicyTargetObservations = 1
+            },
+            Policy(RoutingMode.Economy),
+            new AdaptiveRoutingContext(RoutingMode.Economy, TaskDurationCategory.Short, 1),
+            now,
+            observedCurrentGroupId: 1);
+
+        Assert(result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 2 &&
+            result.Decision.Reason == RouteDecisionReason.CurrentRouteInvalid &&
+            result.Decision.SwitchClass == RouteSwitchClass.ForcedRecovery,
+            "An unavailable current route was delayed by policy hysteresis.");
     }
 
 }

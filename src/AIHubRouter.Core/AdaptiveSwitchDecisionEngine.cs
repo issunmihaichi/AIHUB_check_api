@@ -11,7 +11,9 @@ public sealed record AdaptiveSwitchRequest(
     double NewGenerationSpeed,
     TaskDurationCategory DurationCategory,
     AdaptivePreference BasePreference,
-    double? CurrentIntervalSeconds);
+    double? CurrentIntervalSeconds,
+    int? OldPerformanceSampleCount = null,
+    int? NewPerformanceSampleCount = null);
 
 public enum AdaptiveDecisionReason
 {
@@ -24,6 +26,7 @@ public enum AdaptiveDecisionReason
     CostGuardRejected,
     BalancedGuardRejected,
     SpeedGuardRejected,
+    InsufficientPerformanceEvidence,
     UnknownPreference
 }
 
@@ -47,6 +50,7 @@ public static class AdaptiveRoutingConstants
     public const double PlanningTokensPerSecond = 43.6;
     public const double MinimumUsefulRemainingTokens = 1_000;
     public const double MaximumCostCompletionSeconds = 24 * 60 * 60;
+    public const int MinimumSpeedPerformanceSamples = 20;
 
     public static DurationConfiguration Duration(TaskDurationCategory category) => category switch
     {
@@ -81,6 +85,11 @@ public static class AdaptiveSwitchDecisionEngine
         double? currentIntervalSeconds,
         AdaptivePreference basePreference)
     {
+        if (basePreference == AdaptivePreference.Cost)
+        {
+            return AdaptivePreference.Cost;
+        }
+
         if (currentIntervalSeconds is not { } interval ||
             !double.IsFinite(interval) ||
             interval < 0)
@@ -327,6 +336,8 @@ public static class AdaptiveSwitchDecisionEngine
         double newCompletion,
         double delta)
     {
+        var insufficientEvidence = request.NewPerformanceSampleCount is { } sampleCount &&
+            sampleCount > 0 && sampleCount < AdaptiveRoutingConstants.MinimumSpeedPerformanceSamples;
         var speedBoost = double.IsFinite(request.OldGenerationSpeed) &&
             double.IsFinite(request.NewGenerationSpeed) &&
             request.OldGenerationSpeed > 0 &&
@@ -335,10 +346,15 @@ public static class AdaptiveSwitchDecisionEngine
         var endToEndFaster = HasFiniteCompletionTimes(oldCompletion, newCompletion, delta) &&
             delta < -30;
         var priceNotHigher = request.NewMultiplier <= request.OldMultiplier;
-        var accepted = speedBoost && priceOkForSpeed || endToEndFaster && priceNotHigher;
+        var accepted = !insufficientEvidence &&
+            (speedBoost && priceOkForSpeed || endToEndFaster && priceNotHigher);
         return Decision(
             accepted,
-            accepted ? AdaptiveDecisionReason.AcceptedSpeed : AdaptiveDecisionReason.SpeedGuardRejected,
+            accepted
+                ? AdaptiveDecisionReason.AcceptedSpeed
+                : insufficientEvidence
+                    ? AdaptiveDecisionReason.InsufficientPerformanceEvidence
+                    : AdaptiveDecisionReason.SpeedGuardRejected,
             AdaptivePreference.Speed,
             remainingTokens,
             penalty,
