@@ -288,6 +288,7 @@ public static class RouteDecisionEngine
             BalancedDeadlineDecisionReason.CurrentWithinDeadline =>
                 RouteDecisionReason.BalancedDeadlineCurrentWithinDeadline,
             BalancedDeadlineDecisionReason.SwitchedAfterDeadline => RouteDecisionReason.BalancedDeadlineSwitched,
+            BalancedDeadlineDecisionReason.FastestFallback => RouteDecisionReason.BalancedDeadlineFastestFallback,
             _ => RouteDecisionReason.BalancedDeadlineNoFeasibleCandidate
         };
         var same = current is not null && current.Group.Id == target.Group.Id;

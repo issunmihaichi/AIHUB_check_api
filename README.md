@@ -68,6 +68,38 @@ dotnet run --project .\src\AIHubRouter.WinForms\AIHubRouter.WinForms.csproj --no
 .\scripts\publish.ps1
 ```
 
+## Routing Stability (v1.1.9)
+
+The v1.1.9 rules below supersede the older interval-only description later in
+this README. The complete specification is in
+[Routing Stability V2](docs/ROUTING_STABILITY_V2.md).
+
+- **Forced recovery:** if the current group becomes unavailable, disabled,
+  stale, unauthorized, or missing, the router immediately selects an eligible
+  replacement. This bypasses all policy cooldown rules and is recorded as
+  `ForcedRecovery` in the audit log.
+- **Policy switches:** a normal Economy, Balanced, or Speed change requires a
+  30-second dwell period, six completed routing evaluations, and the same
+  target being preferred twice consecutively.
+- **Economy remains Economy:** an interval below five seconds never upgrades a
+  user-selected Economy mode to Speed.
+- **Conservative performance:** the 20-minute platform/group window exposes
+  P90 first-token latency, P25 output rate, and a sample count. Speed mode
+  does not upgrade to a node with fewer than 20 local performance samples.
+- **Balanced deadline:** completion uses `P90(TTFT) + output budget / P25(rate)`.
+  A current route that meets the hard deadline is retained; a current route
+  that no longer exists is still recovered immediately.
+
+The automated core tests model the following cases: immediate recovery from an
+invalid group, invalid current group during Balanced countdown, 30-second
+cooldown, minimum evaluation count, two-observation candidate stability,
+insufficient Speed evidence, conservative P90/P25 deadline math, and
+credential-free audit output. Run them with:
+
+```powershell
+dotnet run --project .\tests\AIHubRouter.Core.Tests\AIHubRouter.Core.Tests.csproj -c Release
+```
+
 发布脚本会先扫描生产源码，再在临时 staging 目录生成并扫描未压缩程序集和两个 EXE。扫描会阻止凭据形态的 JWT、Bearer/API Key、Cookie、邮箱和本机用户路径进入官方包；候选目录最终只允许包含 `AIHubRouter.exe`。所有检查通过后才替换正式目录，失败时保留上一次已验证版本并清理 staging。
 
 发布脚本会生成两个版本：

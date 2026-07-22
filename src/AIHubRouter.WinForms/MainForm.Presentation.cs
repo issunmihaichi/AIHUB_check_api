@@ -37,9 +37,10 @@ internal sealed partial class MainForm
     {
         return reason switch
         {
-            RouteDecisionReason.BalancedDeadlineColdStart => "均衡冷启动：选择满足截止时间的最低倍率节点",
+            RouteDecisionReason.BalancedDeadlineColdStart => "均衡冷启动：优先最低倍率可行节点",
             RouteDecisionReason.BalancedDeadlineCurrentWithinDeadline => "均衡：当前节点满足截止时间，保持不切换",
             RouteDecisionReason.BalancedDeadlineSwitched => "均衡：当前节点超时，切换到满足截止时间的最低成本节点",
+            RouteDecisionReason.BalancedDeadlineFastestFallback => "均衡：没有节点满足截止时间，切换到最快节点",
             RouteDecisionReason.BalancedDeadlineNoFeasibleCandidate => "均衡：没有节点满足截止时间，保持当前路线",
             RouteDecisionReason.BalancedCountdownExpired => "均衡倒计时结束：已切换为严格经济模式",
             RouteDecisionReason.NoCandidate => "没有符合条件的路由",

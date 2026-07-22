@@ -126,6 +126,37 @@ internal static partial class CoreTestCases
             "Balanced cold start did not choose the cheapest feasible node.");
     }
 
+    internal static void TestBalancedDeadlineColdStartFallsBackToFastestRoute()
+    {
+        var now = DateTimeOffset.Parse("2026-07-23T00:00:00Z");
+        var current = new RouteCandidate(
+            Provider(1, 0.01, true, 1, now, latency: 3_000, outputTps: 5),
+            Group(1),
+            0.01,
+            false);
+        var fastest = new RouteCandidate(
+            Provider(2, 0.06, true, 1, now, latency: 1_000, outputTps: 20),
+            Group(2),
+            0.06,
+            false);
+        var middle = new RouteCandidate(
+            Provider(3, 0.03, true, 1, now, latency: 2_000, outputTps: 8),
+            Group(3),
+            0.03,
+            false);
+
+        var decision = BalancedDeadlineEngine.Decide(new BalancedDeadlineRequest(
+            current,
+            [current, fastest, middle],
+            ExpectedOutputTokens: 1_000,
+            CurrentIntervalSeconds: 30.001,
+            DeadlineSoftSeconds: 5));
+
+        Assert(decision.IsColdStart && decision.ShouldSwitch && decision.Target?.Group.Id == 2 &&
+            decision.Reason == BalancedDeadlineDecisionReason.FastestFallback,
+            "A cold start with no feasible route did not fall back to the fastest route.");
+    }
+
     internal static void TestBalancedDeadlineHonorsSoftTolerance()
     {
         var now = DateTimeOffset.UtcNow;
@@ -156,8 +187,9 @@ internal static partial class CoreTestCases
         Assert(withTolerance.ShouldSwitch && withTolerance.Target?.Group.Id == 2 &&
             withTolerance.Reason == BalancedDeadlineDecisionReason.SwitchedAfterDeadline,
             "A feasible candidate inside the user soft deadline was not selected.");
-        Assert(withoutTolerance.Reason == BalancedDeadlineDecisionReason.NoFeasibleCandidate,
-            "A zero soft tolerance did not preserve the hard deadline boundary.");
+        Assert(withoutTolerance.ShouldSwitch && withoutTolerance.Target?.Group.Id == 2 &&
+            withoutTolerance.Reason == BalancedDeadlineDecisionReason.FastestFallback,
+            "A zero soft tolerance did not fall back to the fastest route after every candidate missed the hard deadline.");
     }
 
     internal static void TestBalancedDeadlineZeroFallsBackToEconomy()
