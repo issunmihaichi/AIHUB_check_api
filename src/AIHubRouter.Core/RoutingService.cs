@@ -138,7 +138,8 @@ public sealed class RoutingService : IDisposable
             now,
             observedGroupId,
             balancedRemainingSeconds,
-            _settings.BalancedDeadlineSoftSeconds);
+            _settings.BalancedDeadlineSoftSeconds,
+            _settings.BalancedExpectedOutputTokens);
         var evaluation = snapshot.Evaluation;
         var decisionResult = snapshot.Result;
         var keyResults = new List<KeyRouteResult>();

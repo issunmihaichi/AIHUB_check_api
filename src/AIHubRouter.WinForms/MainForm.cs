@@ -29,6 +29,7 @@ internal sealed partial class MainForm : Form
     private RouteCandidate? _bestCandidate;
     private double _balancedCountdownSeconds = 7_200;
     private double _balancedDeadlineSoftSeconds = BalancedDeadlineEngine.DefaultSoftDeadlineSeconds;
+    private double _balancedExpectedOutputTokens = 1_000;
     private DateTimeOffset? _balancedCountdownEndsAtUtc;
     private bool _updatingBalancedCountdown;
     private bool _balancedCountdownExpiredApplied;
@@ -129,6 +130,13 @@ internal sealed partial class MainForm : Form
         _balancedSoftDeadlineInput.ValueChanged += (_, _) =>
         {
             _balancedDeadlineSoftSeconds = (double)_balancedSoftDeadlineInput.Value;
+            InvalidateRoutingService();
+            RecalculateCandidate();
+            SaveCurrentSettings(showStatus: false);
+        };
+        _balancedExpectedOutputInput.ValueChanged += (_, _) =>
+        {
+            _balancedExpectedOutputTokens = (double)_balancedExpectedOutputInput.Value;
             InvalidateRoutingService();
             RecalculateCandidate();
             SaveCurrentSettings(showStatus: false);
@@ -500,6 +508,7 @@ internal sealed partial class MainForm : Form
             BalancedCountdownSeconds = _balancedCountdownSeconds,
             BalancedCountdownEndsAtUtc = _balancedCountdownEndsAtUtc,
             BalancedDeadlineSoftSeconds = _balancedDeadlineSoftSeconds,
+            BalancedExpectedOutputTokens = _balancedExpectedOutputTokens,
             MinimumSuccessPercent = (int)_minimumSuccessInput.Value,
             PollingIntervalSeconds = (int)_intervalInput.Value,
             AccountCacheSeconds = (int)_accountCacheInput.Value,
@@ -719,6 +728,9 @@ internal sealed partial class MainForm : Form
                 : null,
             CurrentRoutingMode() == RoutingMode.Balanced
                 ? _balancedDeadlineSoftSeconds
+                : null,
+            CurrentRoutingMode() == RoutingMode.Balanced
+                ? _balancedExpectedOutputTokens
                 : null);
         _lastEvaluation = snapshot.Evaluation;
         _adaptiveRankings = snapshot.Result.Decision.AdaptiveRankings;
@@ -1091,6 +1103,11 @@ internal sealed partial class MainForm : Form
             {
                 _updatingBalancedCountdown = false;
             }
+
+            _balancedExpectedOutputTokens = double.IsFinite(settings.BalancedExpectedOutputTokens)
+                ? Math.Clamp(settings.BalancedExpectedOutputTokens, 0, 10_000_000)
+                : 1_000;
+            _balancedExpectedOutputInput.Value = (decimal)_balancedExpectedOutputTokens;
             _themeCombo.SelectedIndex = settings.Theme switch
             {
                 WinFormsTheme.Light => 1,

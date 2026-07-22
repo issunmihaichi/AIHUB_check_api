@@ -49,6 +49,16 @@ internal sealed partial class MainForm
         Value = (decimal)BalancedDeadlineEngine.DefaultSoftDeadlineSeconds,
         Width = 70
     };
+    private readonly NumericUpDown _balancedExpectedOutputInput = new()
+    {
+        Minimum = 0,
+        Maximum = 10_000_000,
+        Increment = 100,
+        DecimalPlaces = 0,
+        Value = 1_000,
+        ThousandsSeparator = true,
+        Width = 92
+    };
     private readonly ComboBox _themeCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 112 };
     private readonly NumericUpDown _minimumSuccessInput = new()
     {
@@ -292,6 +302,8 @@ internal sealed partial class MainForm
         panel.Controls.Add(_balancedCountdownLabel);
         panel.Controls.Add(CreateToolbarLabel("软截止 + 秒"));
         panel.Controls.Add(_balancedSoftDeadlineInput);
+        panel.Controls.Add(CreateToolbarLabel("预计输出 Token"));
+        panel.Controls.Add(_balancedExpectedOutputInput);
         panel.Controls.Add(CreateToolbarLabel("主题"));
         panel.Controls.Add(_themeCombo);
         panel.Controls.Add(_refreshButton);
@@ -470,6 +482,7 @@ internal sealed partial class MainForm
         _toolTip.SetToolTip(_resetBalancedCountdownButton, "按当前分钟数重新开始均衡倒计时。");
         _toolTip.SetToolTip(_balancedCountdownLabel, "均衡模式剩余时间；同时用于估算本轮输出量。");
         _toolTip.SetToolTip(_balancedSoftDeadlineInput, "均衡模式的用户容忍度：在当前节点超出 26.73 秒硬截止后，允许候选节点最多额外慢多少秒。数值越大越偏向省钱。");
+        _toolTip.SetToolTip(_balancedExpectedOutputInput, "本轮请求预计生成的输出 Token 数，只用于均衡 Deadline 计算，与任务倒计时相互独立。");
         _toolTip.SetToolTip(_simulateButton, "只计算并展示决策，不会修改任何 API Key。");
         _toolTip.SetToolTip(_themeCombo, "跟随 Windows 个性化设置，或固定浅色/深色 WinForms 调色板。");
         _toolTip.SetToolTip(_accountCacheInput, "账户分组、倍率和 Key 列表在此时间内复用；监控数据每次刷新。");

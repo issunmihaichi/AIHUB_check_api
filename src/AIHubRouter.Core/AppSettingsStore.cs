@@ -15,6 +15,7 @@ public sealed class PersistentAppSettings
     public double BalancedCountdownSeconds { get; init; } = 7_200;
     public DateTimeOffset? BalancedCountdownEndsAtUtc { get; init; }
     public double BalancedDeadlineSoftSeconds { get; init; } = BalancedDeadlineEngine.DefaultSoftDeadlineSeconds;
+    public double BalancedExpectedOutputTokens { get; init; } = 1_000;
     public int MinimumSuccessPercent { get; init; }
     public int PollingIntervalSeconds { get; init; } = 60;
     public int AccountCacheSeconds { get; init; } = 300;

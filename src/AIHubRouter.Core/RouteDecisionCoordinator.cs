@@ -16,7 +16,8 @@ public static class RouteDecisionCoordinator
         DateTimeOffset now,
         long? observedCurrentGroupId = null,
         double? balancedRemainingSeconds = null,
-        double? balancedDeadlineSoftSeconds = null)
+        double? balancedDeadlineSoftSeconds = null,
+        double? balancedExpectedOutputTokens = null)
     {
         ArgumentNullException.ThrowIfNull(providers);
         ArgumentNullException.ThrowIfNull(groups);
@@ -62,7 +63,8 @@ public static class RouteDecisionCoordinator
                 durationCategory,
                 currentInterval,
                 balancedRemainingSeconds,
-                balancedDeadlineSoftSeconds),
+                balancedDeadlineSoftSeconds,
+                balancedExpectedOutputTokens),
             now,
             observedCurrentGroupId);
 

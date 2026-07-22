@@ -25,7 +25,7 @@ var tests = new (string Name, Action Body)[]
     ("Adaptive balanced requires all safeguards", TestAdaptiveBalancedSafeguards),
     ("Adaptive speed accepts generation boost", TestAdaptiveSpeedAcceptsGenerationBoost),
     ("Adaptive speed accepts end-to-end gain", TestAdaptiveSpeedAcceptsEndToEndGain),
-    ("Balanced deadline estimates output from countdown", TestBalancedDeadlineEstimatesOutput),
+    ("Balanced deadline uses explicit output budget", TestBalancedDeadlineUsesExplicitOutputBudget),
     ("Balanced deadline keeps current feasible node", TestBalancedDeadlineKeepsCurrentNode),
     ("Balanced deadline switches to cheapest feasible node", TestBalancedDeadlineChoosesCheapestFeasibleNode),
     ("Balanced deadline cold start chooses cheapest feasible node", TestBalancedDeadlineColdStart),
@@ -389,11 +389,34 @@ static void TestAdaptiveSpeedAcceptsEndToEndGain()
     Assert(!exactBoundary.ShouldSwitch, "Speed mode accepted the strict thirty-second boundary.");
 }
 
-static void TestBalancedDeadlineEstimatesOutput()
+static void TestBalancedDeadlineUsesExplicitOutputBudget()
 {
-    var outputTokens = BalancedDeadlineEngine.EstimateOutputTokens(26.73);
-    Assert(Math.Abs(outputTokens - (26.73 * AdaptiveRoutingConstants.PlanningTokensPerSecond)) < 1e-9,
-        "Balanced deadline did not convert the countdown to estimated output tokens.");
+    var now = DateTimeOffset.UtcNow;
+    var evaluation = RoutingEngine.Evaluate(
+        [
+            Provider(1, 0.05, true, 1, now, 1_000, outputTps: 25),
+            Provider(2, 0.01, true, 1, now, 1_000, outputTps: 100)
+        ],
+        [Group(1), Group(2)],
+        new Dictionary<long, double>(),
+        Policy(RoutingMode.Balanced),
+        now);
+    var result = RouteDecisionEngine.Decide(
+        evaluation,
+        new RouteState { CurrentGroupId = 1 },
+        Policy(RoutingMode.Balanced),
+        new AdaptiveRoutingContext(
+            RoutingMode.Balanced,
+            TaskDurationCategory.Medium,
+            CurrentIntervalSeconds: 10,
+            BalancedRemainingSeconds: 7_200,
+            BalancedDeadlineSoftSeconds: 0,
+            BalancedExpectedOutputTokens: 1_000),
+        now,
+        observedCurrentGroupId: 1);
+
+    Assert(result.Decision.BalancedDeadlineDecision?.OutputTokens == 1_000,
+        "Balanced deadline incorrectly derived output tokens from the task countdown.");
     Assert(BalancedDeadlineEngine.DefaultDeadlineSeconds == 26.73,
         "Balanced deadline changed the configured 90th-percentile SLA.");
 }
@@ -704,6 +727,8 @@ static void TestRoutingPreferenceDefaults()
     Assert(settings.RoutingMode == RoutingMode.Economy, "New installs must preserve lowest-price routing.");
     Assert(settings.DurationCategory == TaskDurationCategory.Medium, "New installs must default to Medium duration.");
     Assert(settings.BalancedCountdownSeconds == 7_200, "Balanced countdown must preserve the Medium default.");
+    Assert(settings.BalancedExpectedOutputTokens == 1_000,
+        "Balanced expected output token budget must default independently from the countdown.");
     Assert(settings.BalancedDeadlineSoftSeconds == 5, "Balanced deadline soft tolerance must default to five seconds.");
     Assert(settings.AccountCacheSeconds == 300, "Account cache default changed.");
     Assert(settings.Theme == WinFormsTheme.System, "Theme must follow Windows by default.");
@@ -726,6 +751,7 @@ static void TestRoutingPreferenceRoundtrip()
             DurationCategory = TaskDurationCategory.Long,
             BalancedCountdownSeconds = 1_234.5,
             BalancedCountdownEndsAtUtc = DateTimeOffset.Parse("2026-07-21T10:00:00Z"),
+            BalancedExpectedOutputTokens = 12_345,
             BalancedDeadlineSoftSeconds = 8.5,
             AccountCacheSeconds = 90,
             Theme = WinFormsTheme.Dark
@@ -738,6 +764,8 @@ static void TestRoutingPreferenceRoundtrip()
             "Balanced countdown duration did not roundtrip.");
         Assert(loaded.BalancedCountdownEndsAtUtc == DateTimeOffset.Parse("2026-07-21T10:00:00Z"),
             "Balanced countdown end timestamp did not roundtrip.");
+        Assert(loaded.BalancedExpectedOutputTokens == 12_345,
+            "Balanced expected output token budget did not roundtrip.");
         Assert(Math.Abs(loaded.BalancedDeadlineSoftSeconds - 8.5) < 0.0001,
             "Balanced deadline soft tolerance did not roundtrip.");
         Assert(loaded.AccountCacheSeconds == 90, "Cache duration did not roundtrip.");

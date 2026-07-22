@@ -290,7 +290,8 @@ public sealed record AdaptiveRoutingContext(
     TaskDurationCategory DurationCategory,
     double? CurrentIntervalSeconds,
     double? BalancedRemainingSeconds = null,
-    double? BalancedDeadlineSoftSeconds = null);
+    double? BalancedDeadlineSoftSeconds = null,
+    double? BalancedExpectedOutputTokens = null);
 
 public sealed record RouteState
 {
