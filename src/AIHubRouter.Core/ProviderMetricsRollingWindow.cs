@@ -11,6 +11,9 @@ public sealed class ProviderMetricsRollingWindow
     private readonly TimeSpan _window;
     private readonly Dictionary<ProviderKey, List<ProviderSample>> _providerSamples = [];
     private readonly Dictionary<long, List<UserRateSample>> _userRateSamples = [];
+    private readonly Dictionary<ProviderKey, List<ActiveProbeMeasurement>> _activeProbeSamples = [];
+    private IReadOnlyList<ProviderStatus> _latestProviders = [];
+    private IReadOnlyDictionary<long, double> _latestUserGroupRates = new Dictionary<long, double>();
 
     public ProviderMetricsRollingWindow(TimeSpan? window = null)
     {
@@ -30,6 +33,8 @@ public sealed class ProviderMetricsRollingWindow
         ArgumentNullException.ThrowIfNull(userGroupRates);
 
         var currentProviders = providers.Where(provider => provider is not null).ToArray();
+        _latestProviders = currentProviders;
+        _latestUserGroupRates = new Dictionary<long, double>(userGroupRates);
         Prune(observedAt);
 
         var currentGroups = currentProviders.GroupBy(CreateKey).ToArray();
@@ -63,7 +68,37 @@ public sealed class ProviderMetricsRollingWindow
 
         Prune(observedAt);
 
-        var providersByKey = currentGroups
+        return CreateSnapshot(currentGroups, userGroupRates);
+    }
+
+    public ProviderMetricsSnapshot RecordActiveProbes(IEnumerable<ActiveProbeMeasurement> measurements)
+    {
+        ArgumentNullException.ThrowIfNull(measurements);
+        foreach (var measurement in measurements)
+        {
+            measurement.Validate();
+            var key = new ProviderKey(measurement.Platform.Trim().ToUpperInvariant(), measurement.GroupId, string.Empty);
+            if (!_activeProbeSamples.TryGetValue(key, out var samples))
+            {
+                samples = [];
+                _activeProbeSamples[key] = samples;
+            }
+
+            samples.Add(measurement);
+        }
+
+        var now = measurements.Select(measurement => measurement.ObservedAt).DefaultIfEmpty(DateTimeOffset.UtcNow).Max();
+        Prune(now);
+        var currentGroups = _latestProviders.GroupBy(CreateKey).ToArray();
+        return CreateSnapshot(currentGroups, _latestUserGroupRates);
+    }
+
+    private ProviderMetricsSnapshot CreateSnapshot(
+        IEnumerable<IGrouping<ProviderKey, ProviderStatus>> currentGroups,
+        IReadOnlyDictionary<long, double> userGroupRates)
+    {
+        var groups = currentGroups.ToArray();
+        var providersByKey = groups
             .Select(group =>
             {
                 var key = group.Key;
@@ -91,6 +126,9 @@ public sealed class ProviderMetricsRollingWindow
     {
         _providerSamples.Clear();
         _userRateSamples.Clear();
+        _activeProbeSamples.Clear();
+        _latestProviders = [];
+        _latestUserGroupRates = new Dictionary<long, double>();
     }
 
     private ProviderStatus AggregateProvider(ProviderStatus latest, IReadOnlyList<ProviderSample> samples)
@@ -105,6 +143,17 @@ public sealed class ProviderMetricsRollingWindow
             .Where(value => value is { } speed && IsPositiveFinite(speed))
             .Select(value => value!.Value)
             .ToArray();
+        var probeSamples = _activeProbeSamples.TryGetValue(CreateKey(latest), out var activeSamples)
+            ? activeSamples
+            : [];
+        var activeLatencySamples = probeSamples
+            .Select(sample => sample.FirstTokenLatencyMs)
+            .Where(IsNonNegativeFinite)
+            .ToArray();
+        var activeProbeLatency = Median(activeLatencySamples);
+        DateTimeOffset? activeProbeCheckedAt = probeSamples.Count == 0
+            ? null
+            : probeSamples.Max(sample => sample.ObservedAt);
         var successRates = latest.SuccessRates is { } rates
             ? new Dictionary<string, double>(rates, StringComparer.OrdinalIgnoreCase)
             : new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
@@ -134,7 +183,7 @@ public sealed class ProviderMetricsRollingWindow
             CheckedAt = MedianTimestamp(samples.Select(sample => sample.Provider.CheckedAt)),
             LastCallEndedAt = MedianTimestamp(samples.Select(sample => sample.Provider.LastCallEndedAt)),
             LastCallAt = MedianTimestamp(samples.Select(sample => sample.Provider.LastCallAt)),
-            FirstTokenLatencyMs = Median(samples
+            FirstTokenLatencyMs = activeProbeLatency ?? Median(samples
                 .Select(sample => sample.Provider.FirstTokenLatencyMs)
                 .Where(value => value is { } latency && IsNonNegativeFinite(latency))
                 .Select(value => value!.Value)),
@@ -142,9 +191,12 @@ public sealed class ProviderMetricsRollingWindow
                 .Select(sample => sample.Provider.OutputTokensPerSecond)
                 .Where(value => value is { } speed && IsPositiveFinite(speed))
                 .Select(value => value!.Value)),
-            FirstTokenLatencyP90Ms = Percentile(latencySamples, 0.90),
+            FirstTokenLatencyP90Ms = Percentile(activeLatencySamples, 0.90) ?? Percentile(latencySamples, 0.90),
             OutputTokensPerSecondP25 = Percentile(outputSpeedSamples, 0.25),
             PerformanceSampleCount = Math.Min(latencySamples.Length, outputSpeedSamples.Length),
+            ActiveProbeFirstTokenLatencyMs = activeProbeLatency,
+            ActiveProbeCheckedAt = activeProbeCheckedAt,
+            ActiveProbeSampleCount = probeSamples.Count,
             SuccessRates = successRates,
             ErrorMessage = latest.ErrorMessage,
             WarningReasons = latest.WarningReasons?.Select(reason => new ProviderWarningReason
@@ -161,6 +213,7 @@ public sealed class ProviderMetricsRollingWindow
         var cutoff = now - _window;
         Prune(_providerSamples, cutoff, sample => sample.ObservedAt);
         Prune(_userRateSamples, cutoff, sample => sample.ObservedAt);
+        Prune(_activeProbeSamples, cutoff, sample => sample.ObservedAt);
     }
 
     private static void Prune<TKey, TSample>(

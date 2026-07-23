@@ -23,6 +23,9 @@ internal sealed class ProviderGridRow
     public string State { get; init; } = string.Empty;
     public string Success6h => Source.SuccessRate6h is { } rate ? $"{rate:P1}" : "-";
     public string FirstToken => Source.FirstTokenLatencyMs is { } latency ? $"{latency:0} ms" : "-";
+    public string FirstTokenSource => Source.ActiveProbeFirstTokenLatencyMs is { } latency
+        ? $"本机 {latency:0} ms / {Source.ActiveProbeSampleCount} 次"
+        : "运营商上报";
     public string CheckedAt => Source.CheckedAt?.ToLocalTime().ToString("MM-dd HH:mm:ss") ?? "-";
 }
 
@@ -32,6 +35,8 @@ internal sealed class KeyGridRow
     public long Id { get; init; }
     public string Name { get; init; } = string.Empty;
     public string Status { get; init; } = string.Empty;
+    public string Purpose { get; init; } = string.Empty;
+    public bool IsProbeKey { get; init; }
     public long? GroupId { get; set; }
     public string GroupName { get; set; } = "未绑定";
     public string Platform { get; set; } = "-";

@@ -61,6 +61,15 @@ public sealed class ProviderStatus
     [JsonIgnore]
     public int PerformanceSampleCount { get; init; }
 
+    [JsonIgnore]
+    public double? ActiveProbeFirstTokenLatencyMs { get; init; }
+
+    [JsonIgnore]
+    public DateTimeOffset? ActiveProbeCheckedAt { get; init; }
+
+    [JsonIgnore]
+    public int ActiveProbeSampleCount { get; init; }
+
     [JsonPropertyName("successRates")]
     public Dictionary<string, double> SuccessRates { get; init; } = [];
 

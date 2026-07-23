@@ -120,7 +120,8 @@ internal sealed partial class MainForm
             RefreshToken = _currentSession?.RefreshToken ?? string.Empty,
             AccessTokenExpiresAt = _currentSession?.ExpiresAt,
             Cookie = _cookieText.Text,
-            UserAgent = _userAgentText.Text
+            UserAgent = _userAgentText.Text,
+            ActiveProbeApiKey = _activeProbeApiKey
         };
         _routingService = new RoutingService(
             settings,
@@ -533,9 +534,14 @@ internal sealed partial class MainForm
 
     private void ApplyKeys(IReadOnlyList<ApiKeyInfo> keys)
     {
+        _keys = keys;
         var selectedIds = _hasLoadedKeys && _keySelectionInitialized
             ? CurrentKeyRows().Where(row => row.Selected).Select(row => row.Id).ToHashSet()
             : KeySelectionPolicy.Resolve(_keySelectionInitialized, _savedSelectedKeyIds, keys).ToHashSet();
+        if (_activeProbeCheck.Checked && _activeProbeKeyId is { } activeProbeKeyId)
+        {
+            selectedIds.Remove(activeProbeKeyId);
+        }
         var groupLookup = _groups.ToDictionary(group => group.Id);
 
         _applyingKeys = true;
@@ -550,6 +556,8 @@ internal sealed partial class MainForm
                     Id = key.Id,
                     Name = key.Name,
                     Status = key.Status,
+                    Purpose = IsActiveProbeKey(key.Id) ? "测速专用" : "路由",
+                    IsProbeKey = IsActiveProbeKey(key.Id),
                     GroupId = key.GroupId,
                     GroupName = group?.Name ?? "未绑定",
                     Platform = group?.Platform ?? "-"
@@ -588,6 +596,23 @@ internal sealed partial class MainForm
     {
         if (_applyingKeys || eventArgs.RowIndex < 0 || eventArgs.ColumnIndex != 0)
         {
+            return;
+        }
+
+        if (_keyGrid.Rows[eventArgs.RowIndex].DataBoundItem is KeyGridRow { IsProbeKey: true } probeKey)
+        {
+            _applyingKeys = true;
+            try
+            {
+                probeKey.Selected = false;
+                _keyGrid.Refresh();
+            }
+            finally
+            {
+                _applyingKeys = false;
+            }
+
+            SetStatus("测速专用 Key 已从普通路由中排除。", success: true);
             return;
         }
 

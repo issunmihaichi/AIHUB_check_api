@@ -110,6 +110,7 @@ internal sealed class StubRoutingClient(DateTimeOffset now) : IAIHubApiClient
     public int RatesCalls { get; private set; }
     public int KeysCalls { get; private set; }
     public int UpdateCalls { get; private set; }
+    public List<long> UpdatedGroupIds { get; } = [];
     public int RefreshCalls { get; private set; }
     public int LoginCalls { get; private set; }
     public bool FailFirstSummaryAuth { get; init; }
@@ -188,6 +189,7 @@ internal sealed class StubRoutingClient(DateTimeOffset now) : IAIHubApiClient
     public Task<ApiKeyInfo> UpdateKeyGroupAsync(long keyId, long groupId, CancellationToken cancellationToken = default)
     {
         UpdateCalls++;
+        UpdatedGroupIds.Add(groupId);
         if (UpdateCalls <= FailUpdateCount)
         {
             throw new InvalidOperationException("synthetic update failure");

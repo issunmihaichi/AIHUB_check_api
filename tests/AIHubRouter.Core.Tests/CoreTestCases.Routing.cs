@@ -477,4 +477,31 @@ internal static partial class CoreTestCases
         Assert(state.Load().CurrentGroupId == 2, "Mixed-group reconciliation lost the target state.");
     }
 
+    internal static void TestActiveProbeKeyIsExcludedFromRouting()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var api = new StubRoutingClient(now) { TwoKeys = true };
+        var settings = new PersistentAppSettings
+        {
+            KeySelectionInitialized = true,
+            SelectedKeyIds = [10, 11],
+            ActiveProbeEnabled = true,
+            ActiveProbeKeyId = 10
+        };
+        using var service = new RoutingService(
+            settings,
+            new PersistentCredentials { BearerToken = "synthetic-access" },
+            new MemoryRouteStateStore(),
+            new StubRoutingClientFactory(api),
+            utcNow: () => now);
+
+        var result = service.RunOnceAsync().GetAwaiter().GetResult();
+
+        Assert(result.SelectedKeyIds.SequenceEqual(new long[] { 11 }),
+            "The dedicated active-probe Key was included in normal routing.");
+        Assert(result.KeyResults.Count == 1 && result.KeyResults[0].KeyId == 11,
+            "Routing attempted to update the dedicated active-probe Key.");
+        Assert(api.UpdateCalls == 1, "The remaining route Key was not updated.");
+    }
+
 }

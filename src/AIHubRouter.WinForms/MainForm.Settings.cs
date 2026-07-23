@@ -26,7 +26,11 @@ internal sealed partial class MainForm
             KeySelectionInitialized = _keySelectionInitialized,
             SelectedKeyIds = _savedSelectedKeyIds.Order().ToArray(),
             BlockedGroupIds = _providerBlocklist.BlockedGroupIds.Order().ToArray(),
-            BlockedNodePatterns = _providerBlocklist.BlockedNodePatterns.ToArray()
+            BlockedNodePatterns = _providerBlocklist.BlockedNodePatterns.ToArray(),
+            ActiveProbeEnabled = _activeProbeCheck.Checked,
+            ActiveProbeKeyId = _activeProbeKeyId,
+            ActiveProbeModel = _activeProbeModel,
+            ActiveProbeIntervalSeconds = 60
         };
     }
 
@@ -208,6 +212,9 @@ internal sealed partial class MainForm
             _keySelectionInitialized = settings.KeySelectionInitialized;
             _savedSelectedKeyIds = settings.SelectedKeyIds.ToHashSet();
             _providerBlocklist = new ProviderBlocklist(settings.BlockedGroupIds, settings.BlockedNodePatterns);
+            _activeProbeCheck.Checked = settings.ActiveProbeEnabled;
+            _activeProbeKeyId = settings.ActiveProbeKeyId;
+            _activeProbeModel = settings.ActiveProbeModel;
 
             if (settings.PersistCredentials && snapshot.Credentials is { } credentials)
             {
@@ -216,6 +223,7 @@ internal sealed partial class MainForm
                 _tokenText.Text = credentials.BearerToken;
                 _cookieText.Text = credentials.Cookie;
                 _userAgentText.Text = credentials.UserAgent;
+                _activeProbeApiKey = credentials.ActiveProbeApiKey;
                 if (!new LoginCredentials(credentials.Email, credentials.Password).IsComplete &&
                     (!string.IsNullOrWhiteSpace(credentials.BearerToken) ||
                         !string.IsNullOrWhiteSpace(credentials.Cookie) ||
@@ -261,7 +269,8 @@ internal sealed partial class MainForm
                     RefreshToken = _currentSession?.RefreshToken ?? string.Empty,
                     AccessTokenExpiresAt = _currentSession?.ExpiresAt,
                     Cookie = _cookieText.Text,
-                    UserAgent = _userAgentText.Text
+                    UserAgent = _userAgentText.Text,
+                    ActiveProbeApiKey = _activeProbeApiKey
                 }
                 : null;
 

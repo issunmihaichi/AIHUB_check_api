@@ -28,6 +28,9 @@ internal sealed partial class MainForm
     private readonly Button _simulateButton = new() { Text = "模拟", AutoSize = true };
     private readonly Button _routeNowButton = new() { Text = "立即路由", AutoSize = true };
     private readonly Button _manageBlocklistButton = new() { Text = "黑名单...", AutoSize = true };
+    private readonly CheckBox _activeProbeCheck = new() { Text = "主动测速（60 秒）", AutoSize = true };
+    private readonly Button _activeProbeSettingsButton = new() { Text = "测速设置...", AutoSize = true };
+    private readonly Button _runActiveProbeButton = new() { Text = "立即测速", AutoSize = true };
     private readonly ComboBox _platformCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 110 };
     private readonly ComboBox _routingModeCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 92 };
     private readonly NumericUpDown _balancedCountdownInput = new()
@@ -91,6 +94,8 @@ internal sealed partial class MainForm
     private readonly BufferedDataGridView _keyGrid = CreateGrid();
     private readonly ContextMenuStrip _providerContextMenu = new();
     private readonly ToolStripMenuItem _toggleGroupBlocklistMenuItem = new();
+    private readonly ContextMenuStrip _keyContextMenu = new();
+    private readonly ToolStripMenuItem _setActiveProbeKeyMenuItem = new();
     private readonly ToolTip _toolTip = new() { AutoPopDelay = 12000, InitialDelay = 350, ReshowDelay = 100 };
     private readonly StatusStrip _statusStrip = new();
     private readonly ToolStripStatusLabel _statusLabel = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
@@ -295,6 +300,9 @@ internal sealed partial class MainForm
         panel.Controls.Add(_accountCacheInput);
         panel.Controls.Add(CreateToolbarLabel("秒"));
         panel.Controls.Add(_autoRouteCheck);
+        panel.Controls.Add(_activeProbeCheck);
+        panel.Controls.Add(_activeProbeSettingsButton);
+        panel.Controls.Add(_runActiveProbeButton);
         panel.Controls.Add(_verticalSyncCheck);
         panel.Controls.Add(CreateToolbarLabel("模式"));
         panel.Controls.Add(_routingModeCombo);
@@ -389,6 +397,7 @@ internal sealed partial class MainForm
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "状态", DataPropertyName = "State", Width = 105 });
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "6h 可用率", DataPropertyName = "Success6h", Width = 92 });
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "首 Token", DataPropertyName = "FirstToken", Width = 88 });
+        _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "首字来源", DataPropertyName = "FirstTokenSource", Width = 128 });
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "检测时间", DataPropertyName = "CheckedAt", Width = 118 });
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "黑名单", DataPropertyName = "BlockStatus", Width = 90 });
         _providerGrid.CellFormatting += (_, eventArgs) =>
@@ -403,10 +412,17 @@ internal sealed partial class MainForm
 
     private void ConfigureKeyGrid()
     {
+        _keyContextMenu.Items.Add(_setActiveProbeKeyMenuItem);
+        _keyContextMenu.Opening += HandleKeyContextMenuOpening;
+        _setActiveProbeKeyMenuItem.Click += (_, _) => SetCurrentKeyAsActiveProbeKey();
+        _keyGrid.ContextMenuStrip = _keyContextMenu;
+        _keyGrid.MouseDown += HandleKeyGridMouseDown;
+        _keyGrid.CellMouseDown += HandleKeyGridCellMouseDown;
         _keyGrid.Columns.Add(new DataGridViewCheckBoxColumn { HeaderText = "路由", DataPropertyName = "Selected", Width = 58 });
         _keyGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "ID", DataPropertyName = "Id", Width = 68, ReadOnly = true });
         _keyGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "名称", DataPropertyName = "Name", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = 180, ReadOnly = true });
         _keyGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "状态", DataPropertyName = "Status", Width = 100, ReadOnly = true });
+        _keyGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "用途", DataPropertyName = "Purpose", Width = 92, ReadOnly = true });
         _keyGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "分组 ID", DataPropertyName = "GroupId", Width = 80, ReadOnly = true });
         _keyGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "当前分组", DataPropertyName = "GroupName", Width = 220, ReadOnly = true });
         _keyGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "平台", DataPropertyName = "Platform", Width = 100, ReadOnly = true });
@@ -485,6 +501,9 @@ internal sealed partial class MainForm
         _toolTip.SetToolTip(_verticalSyncCheck, "Windows 桌面由 DWM 合成；此开关控制窗口和表格双缓冲，减少刷新与滚动闪烁。");
         _toolTip.SetToolTip(_authGuideButton, "打开完整认证步骤和可复制的浏览器命令。");
         _toolTip.SetToolTip(_persistCredentialsCheck, "勾选后，账号、session、Cookie 和 UA 会通过 Windows DPAPI 加密保存到当前用户目录。");
+        _toolTip.SetToolTip(_activeProbeCheck, "每 60 秒使用专用测速 Key 依次请求各可用节点，采集本机实测首 Token 延迟。测速 Key 不参与正常路由。");
+        _toolTip.SetToolTip(_activeProbeSettingsButton, "配置专用测速 Key、其明文 API Key 和测试模型。API Key 仅在启用常态化保存时使用 Windows DPAPI 加密持久化。");
+        _toolTip.SetToolTip(_runActiveProbeButton, "立即对当前平台所有可用且未拉黑的分组执行一次一 Token 流式测速。");
         _toolTip.SetToolTip(_saveSettingsButton, "立即保存连接、认证、Key 勾选和路由界面配置。");
         _toolTip.SetToolTip(_providerGrid, "拖动列分隔线时调整右侧列：向左扩宽右侧列，向右缩窄右侧列。");
         _toolTip.SetToolTip(_keyGrid, "拖动列分隔线时调整右侧列：向左扩宽右侧列，向右缩窄右侧列。");

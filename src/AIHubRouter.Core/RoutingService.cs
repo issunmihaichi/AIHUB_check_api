@@ -227,6 +227,7 @@ public sealed class RoutingService : IDisposable
         var selected = selectedIds.ToHashSet();
         return keys.Where(key => selected.Contains(key.Id))
             .Where(key => key.Status.Equals("active", StringComparison.OrdinalIgnoreCase))
+            .Where(key => !_settings.ActiveProbeEnabled || key.Id != _settings.ActiveProbeKeyId)
             .ToArray();
     }
 
@@ -294,7 +295,8 @@ public sealed class RoutingService : IDisposable
             RefreshToken = session.RefreshToken,
             AccessTokenExpiresAt = session.ExpiresAt,
             Cookie = _credentials.Cookie,
-            UserAgent = _credentials.UserAgent
+            UserAgent = _credentials.UserAgent,
+            ActiveProbeApiKey = _credentials.ActiveProbeApiKey
         };
         if (_persistCredentials is not null)
         {

@@ -25,6 +25,10 @@ public sealed class PersistentAppSettings
     public long[] SelectedKeyIds { get; init; } = [];
     public long[] BlockedGroupIds { get; init; } = [];
     public string[] BlockedNodePatterns { get; init; } = [];
+    public bool ActiveProbeEnabled { get; init; }
+    public long? ActiveProbeKeyId { get; init; }
+    public string ActiveProbeModel { get; init; } = string.Empty;
+    public int ActiveProbeIntervalSeconds { get; init; } = 60;
 
     public BalancedRoutingPolicy CreatePolicy()
     {
@@ -48,6 +52,7 @@ public sealed class PersistentCredentials
     public DateTimeOffset? AccessTokenExpiresAt { get; init; }
     public string Cookie { get; init; } = string.Empty;
     public string UserAgent { get; init; } = string.Empty;
+    public string ActiveProbeApiKey { get; init; } = string.Empty;
 }
 
 public sealed record PersistenceSnapshot(

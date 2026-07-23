@@ -10,6 +10,7 @@ internal sealed partial class MainForm : Form
 {
     private readonly CancellationTokenSource _shutdown = new();
     private readonly System.Windows.Forms.Timer _autoTimer = new();
+    private readonly System.Windows.Forms.Timer _activeProbeTimer = new() { Interval = 60_000 };
     private readonly System.Windows.Forms.Timer _balancedCountdownTimer = new() { Interval = 500 };
     private readonly AppSettingsStore _settingsStore = new();
     private bool _busy;
@@ -25,6 +26,7 @@ internal sealed partial class MainForm : Form
     private WinFormsTheme _themePreference = WinFormsTheme.System;
     private MonitorSummary? _summary;
     private IReadOnlyList<GroupInfo> _groups = [];
+    private IReadOnlyList<ApiKeyInfo> _keys = [];
     private IReadOnlyDictionary<long, double> _rawUserRates = new Dictionary<long, double>();
     private IReadOnlyDictionary<long, double> _userRates = new Dictionary<long, double>();
     private IReadOnlyList<AdaptiveCandidateRanking> _adaptiveRankings = [];
@@ -36,6 +38,9 @@ internal sealed partial class MainForm : Form
     private DateTimeOffset? _balancedCountdownEndsAtUtc;
     private bool _updatingBalancedCountdown;
     private bool _balancedCountdownExpiredApplied;
+    private long? _activeProbeKeyId;
+    private string _activeProbeApiKey = string.Empty;
+    private string _activeProbeModel = string.Empty;
 
     public MainForm()
     {
@@ -61,11 +66,13 @@ internal sealed partial class MainForm : Form
             }
 
             _autoTimer.Stop();
+            _activeProbeTimer.Stop();
             _balancedCountdownTimer.Stop();
             _routingService?.Dispose();
             _shutdown.Cancel();
             _toolTip.Dispose();
             _providerContextMenu.Dispose();
+            _keyContextMenu.Dispose();
         };
         _authGuideButton.Click += (_, _) => ShowAuthenticationGuide();
         _openLoginButton.Click += (_, _) => OpenLoginPage();
@@ -75,6 +82,9 @@ internal sealed partial class MainForm : Form
         _resetBaseUrlButton.Click += (_, _) => _baseUrlText.Text = "https://aihub.top";
         _saveSettingsButton.Click += (_, _) => SaveCurrentSettings(showStatus: true);
         _manageBlocklistButton.Click += (_, _) => ShowBlocklistDialog();
+        _activeProbeSettingsButton.Click += (_, _) => ShowActiveProbeSettings();
+        _runActiveProbeButton.Click += async (_, _) => await ExecuteActiveProbeAsync(manual: true);
+        _activeProbeCheck.CheckedChanged += (_, _) => HandleActiveProbeEnabledChanged();
         _persistCredentialsCheck.CheckedChanged += (_, _) => HandlePersistenceChanged();
         _validateButton.Click += async (_, _) => await ValidateAuthenticationAsync();
         _refreshButton.Click += async (_, _) =>
@@ -157,8 +167,10 @@ internal sealed partial class MainForm : Form
         };
         _keyGrid.CellValueChanged += (_, eventArgs) => HandleKeySelectionChanged(eventArgs);
         _autoTimer.Tick += async (_, _) => await ExecuteRoutingCycleAsync();
+        _activeProbeTimer.Tick += async (_, _) => await ExecuteActiveProbeAsync(manual: false);
         _balancedCountdownTimer.Tick += (_, _) => UpdateBalancedCountdownDisplay();
         UpdateTimerInterval();
+        UpdateActiveProbeTimer();
         UpdateBalancedCountdownDisplay();
         _balancedCountdownTimer.Start();
     }

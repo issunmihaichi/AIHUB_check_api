@@ -124,6 +124,9 @@ internal sealed partial class MainForm
         _refreshButton.Enabled = !busy;
         _simulateButton.Enabled = !busy;
         _routeNowButton.Enabled = !busy;
+        _activeProbeCheck.Enabled = !busy;
+        _activeProbeSettingsButton.Enabled = !busy;
+        _runActiveProbeButton.Enabled = !busy;
         _progressBar.Visible = busy;
         if (message is not null)
         {
