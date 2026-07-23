@@ -71,6 +71,131 @@ internal static partial class CoreTestCases
             "Strict Economy selection did not preserve the accepted cost reason.");
     }
 
+    internal static void TestFirstTokenKeepsStaleProviderEligible()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var stale = now.AddMinutes(-16);
+        var result = RoutingEngine.Evaluate(
+            [
+                Provider(1, 0.01, true, 0.99, stale, latency: 1_500),
+                Provider(2, 0.02, true, 0.99, stale, latency: null)
+            ],
+            [Group(1), Group(2)],
+            new Dictionary<long, double>(),
+            Policy(RoutingMode.Economy),
+            now);
+
+        Assert(result.EligibleCandidates.Count == 1 &&
+            result.EligibleCandidates[0].Group.Id == 1 &&
+            result.EligibleCandidates[0].Provider.FirstTokenLatencyMs == 1_500,
+            "A provider with a valid first-token measurement was incorrectly rejected as stale.");
+        Assert(ProviderStatusPresentation.IsRoutable(
+                result.EligibleCandidates[0].Provider,
+                hasAccountData: true,
+                isAuthorized: true,
+                effectiveMultiplier: 0.01,
+                minimumSuccessRate6h: 0,
+                now,
+                TimeSpan.FromMinutes(15)),
+            "The grid presentation disagreed with routing eligibility for first-token evidence.");
+    }
+
+    internal static void TestStaleFirstTokenCandidatesParticipateInRanking()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var stale = now.AddHours(-1);
+        var result = RoutingEngine.Evaluate(
+            [
+                Provider(1, 0.01, true, 0.99, stale, latency: 2_000),
+                Provider(2, 0.011, true, 0.99, stale, latency: 100)
+            ],
+            [Group(1), Group(2)],
+            new Dictionary<long, double>(),
+            Policy(RoutingMode.Speed),
+            now);
+
+        Assert(result.EligibleCandidates.Count == 2 &&
+            result.CandidateScores.ContainsKey(1) &&
+            result.CandidateScores.ContainsKey(2) &&
+            result.Recommended?.Group.Id == 2,
+            "Stale providers with valid first-token data did not participate in weighted ranking.");
+    }
+
+    internal static void TestForcedGroupOverridesRoutingPolicyUntilUnavailable()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var evaluation = RoutingEngine.Evaluate(
+            [
+                Provider(1, 0.01, true, 0.99, now, latency: 2_000),
+                Provider(2, 0.20, true, 0.99, now, latency: 100)
+            ],
+            [Group(1), Group(2)],
+            new Dictionary<long, double>(),
+            Policy(RoutingMode.Balanced),
+            now);
+
+        var forced = RouteDecisionEngine.Decide(
+            evaluation,
+            new RouteState
+            {
+                CurrentGroupId = 1,
+                ForcedGroupId = 2,
+                LastPolicySwitchAt = now,
+                CompletedPolicyEvaluationsSinceLastSwitch = 0
+            },
+            Policy(RoutingMode.Balanced),
+            new AdaptiveRoutingContext(RoutingMode.Balanced, TaskDurationCategory.Medium, 10),
+            now,
+            observedCurrentGroupId: 1);
+
+        Assert(forced.Decision.ShouldSwitch &&
+            forced.Decision.Target?.Group.Id == 2 &&
+            forced.Decision.Reason == RouteDecisionReason.ForcedGroupSelected &&
+            forced.NextState.ForcedGroupId == 2,
+            "A forced group did not override the normal routing policy.");
+
+        var unavailableEvaluation = RoutingEngine.Evaluate(
+            [Provider(1, 0.01, true, 0.99, now, latency: 2_000)],
+            [Group(1), Group(2)],
+            new Dictionary<long, double>(),
+            Policy(RoutingMode.Balanced),
+            now);
+        var recovered = RouteDecisionEngine.Decide(
+            unavailableEvaluation,
+            forced.NextState,
+            Policy(RoutingMode.Balanced),
+            new AdaptiveRoutingContext(RoutingMode.Balanced, TaskDurationCategory.Medium, 10),
+            now,
+            observedCurrentGroupId: 2);
+
+        Assert(recovered.NextState.ForcedGroupId is null &&
+            recovered.Decision.Target?.Group.Id == 1,
+            "An unavailable forced group was not cleared before normal recovery.");
+    }
+
+    internal static void TestReleasingForcedGroupResetsPolicyObservation()
+    {
+        var state = new RouteState
+        {
+            CurrentGroupId = 7,
+            ForcedGroupId = 9,
+            LastPolicySwitchAt = DateTimeOffset.UtcNow,
+            CompletedPolicyEvaluationsSinceLastSwitch = 4,
+            PendingPolicyTargetGroupId = 11,
+            PendingPolicyTargetObservations = 2
+        };
+
+        var released = state.ReleaseForcedGroup();
+
+        Assert(released.ForcedGroupId is null &&
+            released.LastPolicySwitchAt is null &&
+            released.CompletedPolicyEvaluationsSinceLastSwitch == 0 &&
+            released.PendingPolicyTargetGroupId is null &&
+            released.PendingPolicyTargetObservations == 0 &&
+            released.CurrentGroupId == state.CurrentGroupId,
+            "Releasing a forced group did not reset policy observations while preserving the current route.");
+    }
+
     internal static void TestFrequentCallsOverrideEconomy()
     {
         var now = DateTimeOffset.UtcNow;
@@ -301,8 +426,10 @@ internal static partial class CoreTestCases
         try
         {
             var store = new JsonRouteStateStore(directory);
-            store.Save(new RouteState { CurrentGroupId = 42 });
-            Assert(store.Load().CurrentGroupId == 42, "Route state did not roundtrip.");
+            store.Save(new RouteState { CurrentGroupId = 42, ForcedGroupId = 24 });
+            var loaded = store.Load();
+            Assert(loaded.CurrentGroupId == 42 && loaded.ForcedGroupId == 24,
+                "Route state did not roundtrip.");
             Assert(!File.Exists(Path.Combine(directory, "route-state.json.tmp")), "Temporary route state was left behind.");
         }
         finally

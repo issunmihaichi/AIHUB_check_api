@@ -32,6 +32,7 @@ public static class BalancedDeadlineEngine
 {
     public const double DefaultDeadlineSeconds = 26.73;
     public const double DefaultSoftDeadlineSeconds = 5;
+    public const double DefaultExpectedOutputTokens = 1_000;
     public const double ColdStartThresholdSeconds = 30;
     public const double ContextMissPenaltyUsdPerMultiplier = 2.0;
 

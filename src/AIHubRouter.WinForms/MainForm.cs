@@ -9,12 +9,15 @@ namespace AIHubRouter.WinForms;
 internal sealed partial class MainForm : Form
 {
     private readonly CancellationTokenSource _shutdown = new();
+    private CancellationTokenSource? _activeProbeCancellation;
     private readonly System.Windows.Forms.Timer _autoTimer = new();
-    private readonly System.Windows.Forms.Timer _activeProbeTimer = new() { Interval = 60_000 };
-    private readonly System.Windows.Forms.Timer _balancedCountdownTimer = new() { Interval = 500 };
+    private readonly System.Windows.Forms.Timer _activeProbeTimer = new() { Interval = 90_000 };
     private readonly AppSettingsStore _settingsStore = new();
     private bool _busy;
+    private bool _applyingRoutingSettings;
+    private bool _suppressRoutingPersistence;
     private bool _hasLoadedKeys;
+    private bool _hasAuthenticatedAccountData;
     private bool _keySelectionInitialized;
     private bool _applyingKeys;
     private bool _applyingSessionCredentials;
@@ -32,12 +35,10 @@ internal sealed partial class MainForm : Form
     private IReadOnlyList<AdaptiveCandidateRanking> _adaptiveRankings = [];
     private RouteCandidate? _bestCandidate;
     private ProviderBlocklist _providerBlocklist = ProviderBlocklist.Empty;
-    private double _balancedCountdownSeconds = 7_200;
+    private long? _forcedGroupId;
+    private TaskDurationCategory _durationCategory = TaskDurationCategory.Medium;
     private double _balancedDeadlineSoftSeconds = BalancedDeadlineEngine.DefaultSoftDeadlineSeconds;
-    private double _balancedExpectedOutputTokens = 1_000;
-    private DateTimeOffset? _balancedCountdownEndsAtUtc;
-    private bool _updatingBalancedCountdown;
-    private bool _balancedCountdownExpiredApplied;
+    private double _balancedExpectedOutputTokens = BalancedDeadlineEngine.DefaultExpectedOutputTokens;
     private long? _activeProbeKeyId;
     private string _activeProbeApiKey = string.Empty;
     private string _activeProbeModel = string.Empty;
@@ -67,8 +68,8 @@ internal sealed partial class MainForm : Form
 
             _autoTimer.Stop();
             _activeProbeTimer.Stop();
-            _balancedCountdownTimer.Stop();
             _routingService?.Dispose();
+            _activeProbeCancellation?.Cancel();
             _shutdown.Cancel();
             _toolTip.Dispose();
             _providerContextMenu.Dispose();
@@ -81,9 +82,8 @@ internal sealed partial class MainForm : Form
         _pasteUserAgentButton.Click += (_, _) => PasteCredential(_userAgentText, "User-Agent");
         _resetBaseUrlButton.Click += (_, _) => _baseUrlText.Text = "https://aihub.top";
         _saveSettingsButton.Click += (_, _) => SaveCurrentSettings(showStatus: true);
-        _manageBlocklistButton.Click += (_, _) => ShowBlocklistDialog();
-        _activeProbeSettingsButton.Click += (_, _) => ShowActiveProbeSettings();
-        _runActiveProbeButton.Click += async (_, _) => await ExecuteActiveProbeAsync(manual: true);
+        _routingSettingsButton.Click += (_, _) => ShowRoutingSettingsDialog();
+        _cancelActiveProbeButton.Click += (_, _) => CancelActiveProbe();
         _activeProbeCheck.CheckedChanged += (_, _) => HandleActiveProbeEnabledChanged();
         _persistCredentialsCheck.CheckedChanged += (_, _) => HandlePersistenceChanged();
         _validateButton.Click += async (_, _) => await ValidateAuthenticationAsync();
@@ -100,10 +100,22 @@ internal sealed partial class MainForm : Form
         };
         _simulateButton.Click += async (_, _) => await ExecuteRoutingCycleAsync(dryRun: true);
         _routeNowButton.Click += async (_, _) => await ExecuteRoutingCycleAsync();
-        _autoRouteCheck.CheckedChanged += async (_, _) => await ToggleAutoRoutingAsync();
+        _autoRouteCheck.CheckedChanged += async (_, _) =>
+        {
+            if (!_applyingRoutingSettings)
+            {
+                await ToggleAutoRoutingAsync();
+            }
+        };
         _showCredentialsCheck.CheckedChanged += (_, _) => ToggleCredentialVisibility();
         _advancedAuthenticationCheck.CheckedChanged += (_, _) => ToggleAdvancedAuthentication();
-        _verticalSyncCheck.CheckedChanged += (_, _) => ApplySmoothRendering();
+        _verticalSyncCheck.CheckedChanged += (_, _) =>
+        {
+            if (!_applyingRoutingSettings)
+            {
+                ApplySmoothRendering();
+            }
+        };
         _emailText.TextChanged += (_, _) => ResetAuthenticationAndRoutingService();
         _passwordText.TextChanged += (_, _) => ResetAuthenticationAndRoutingService();
         _baseUrlText.TextChanged += (_, _) => ResetAuthenticationAndRoutingService();
@@ -123,26 +135,23 @@ internal sealed partial class MainForm : Form
         };
         _minimumSuccessInput.ValueChanged += (_, _) =>
         {
+            if (_applyingRoutingSettings) return;
             InvalidateRoutingService();
             RecalculateCandidate();
         };
-        _intervalInput.ValueChanged += (_, _) => UpdateTimerInterval();
+        _intervalInput.ValueChanged += (_, _) =>
+        {
+            if (!_applyingRoutingSettings) UpdateTimerInterval();
+        };
         _routingModeCombo.SelectedIndexChanged += (_, _) =>
         {
             InvalidateRoutingService();
             RecalculateCandidate();
             SaveCurrentSettings(showStatus: false);
         };
-        _balancedCountdownInput.ValueChanged += (_, _) =>
-        {
-            if (!_updatingBalancedCountdown)
-            {
-                RestartBalancedCountdown();
-            }
-        };
-        _resetBalancedCountdownButton.Click += (_, _) => RestartBalancedCountdown();
         _balancedSoftDeadlineInput.ValueChanged += (_, _) =>
         {
+            if (_applyingRoutingSettings) return;
             _balancedDeadlineSoftSeconds = (double)_balancedSoftDeadlineInput.Value;
             InvalidateRoutingService();
             RecalculateCandidate();
@@ -150,6 +159,7 @@ internal sealed partial class MainForm : Form
         };
         _balancedExpectedOutputInput.ValueChanged += (_, _) =>
         {
+            if (_applyingRoutingSettings) return;
             _balancedExpectedOutputTokens = (double)_balancedExpectedOutputInput.Value;
             InvalidateRoutingService();
             RecalculateCandidate();
@@ -157,22 +167,21 @@ internal sealed partial class MainForm : Form
         };
         _accountCacheInput.ValueChanged += (_, _) =>
         {
+            if (_applyingRoutingSettings) return;
             InvalidateRoutingService();
             SaveCurrentSettings(showStatus: false);
         };
         _themeCombo.SelectedIndexChanged += (_, _) =>
         {
+            if (_applyingRoutingSettings) return;
             ApplySelectedTheme();
             SaveCurrentSettings(showStatus: false);
         };
         _keyGrid.CellValueChanged += (_, eventArgs) => HandleKeySelectionChanged(eventArgs);
         _autoTimer.Tick += async (_, _) => await ExecuteRoutingCycleAsync();
         _activeProbeTimer.Tick += async (_, _) => await ExecuteActiveProbeAsync(manual: false);
-        _balancedCountdownTimer.Tick += (_, _) => UpdateBalancedCountdownDisplay();
         UpdateTimerInterval();
         UpdateActiveProbeTimer();
-        UpdateBalancedCountdownDisplay();
-        _balancedCountdownTimer.Start();
     }
 
 }

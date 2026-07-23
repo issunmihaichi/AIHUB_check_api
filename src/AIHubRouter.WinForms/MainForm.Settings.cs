@@ -14,8 +14,6 @@ internal sealed partial class MainForm
             Platform = _platformCombo.SelectedItem?.ToString() ?? "openai",
             RoutingMode = CurrentRoutingMode(),
             DurationCategory = CurrentDurationCategory(),
-            BalancedCountdownSeconds = _balancedCountdownSeconds,
-            BalancedCountdownEndsAtUtc = _balancedCountdownEndsAtUtc,
             BalancedDeadlineSoftSeconds = _balancedDeadlineSoftSeconds,
             BalancedExpectedOutputTokens = _balancedExpectedOutputTokens,
             MinimumSuccessPercent = (int)_minimumSuccessInput.Value,
@@ -30,7 +28,7 @@ internal sealed partial class MainForm
             ActiveProbeEnabled = _activeProbeCheck.Checked,
             ActiveProbeKeyId = _activeProbeKeyId,
             ActiveProbeModel = _activeProbeModel,
-            ActiveProbeIntervalSeconds = 60
+            ActiveProbeIntervalSeconds = 90
         };
     }
 
@@ -48,11 +46,10 @@ internal sealed partial class MainForm
 
     private TaskDurationCategory CurrentDurationCategory()
     {
-        return _balancedCountdownSeconds <= 3_600
-            ? TaskDurationCategory.Short
-            : _balancedCountdownSeconds <= 21_600
-                ? TaskDurationCategory.Medium
-                : TaskDurationCategory.Long;
+        return _durationCategory is TaskDurationCategory.Short or
+            TaskDurationCategory.Medium or TaskDurationCategory.Long
+            ? _durationCategory
+            : TaskDurationCategory.Medium;
     }
 
     private void ApplySelectedTheme()
@@ -70,50 +67,6 @@ internal sealed partial class MainForm
     private void UpdateTimerInterval()
     {
         _autoTimer.Interval = checked((int)_intervalInput.Value * 1000);
-    }
-
-    private double GetBalancedRemainingSeconds(DateTimeOffset now)
-    {
-        if (_balancedCountdownEndsAtUtc is not { } end)
-        {
-            return 0;
-        }
-
-        var remaining = (end - now).TotalSeconds;
-        return double.IsFinite(remaining) ? Math.Max(0, remaining) : 0;
-    }
-
-    private void RestartBalancedCountdown()
-    {
-        _balancedCountdownSeconds = Math.Max(0, (double)_balancedCountdownInput.Value * 60);
-        _balancedCountdownEndsAtUtc = DateTimeOffset.UtcNow.AddSeconds(_balancedCountdownSeconds);
-        _balancedCountdownExpiredApplied = false;
-        UpdateBalancedCountdownDisplay();
-        InvalidateRoutingService();
-        RecalculateCandidate();
-        SaveCurrentSettings(showStatus: false);
-    }
-
-    private void UpdateBalancedCountdownDisplay()
-    {
-        var remaining = GetBalancedRemainingSeconds(DateTimeOffset.UtcNow);
-        if (CurrentRoutingMode() == RoutingMode.Balanced && remaining <= 0 && !_balancedCountdownExpiredApplied)
-        {
-            _balancedCountdownExpiredApplied = true;
-            InvalidateRoutingService();
-            RecalculateCandidate();
-        }
-        else if (remaining > 0)
-        {
-            _balancedCountdownExpiredApplied = false;
-        }
-        var totalSeconds = Math.Max(0, Math.Round(remaining));
-        var hours = (int)(totalSeconds / 3600);
-        var minutes = (int)((totalSeconds % 3600) / 60);
-        var seconds = (int)(totalSeconds % 60);
-        _balancedCountdownLabel.Text = hours > 0
-            ? $"剩余 {hours:00}:{minutes:00}:{seconds:00}"
-            : $"剩余 {minutes:00}:{seconds:00}";
     }
 
     private void ApplySmoothRendering(bool showStatus = true)
@@ -155,50 +108,16 @@ internal sealed partial class MainForm
                 RoutingMode.Speed => 2,
                 _ => 0
             };
-            var configuredCountdownSeconds = settings.BalancedCountdownSeconds;
-            if (!double.IsFinite(configuredCountdownSeconds) || configuredCountdownSeconds < 0)
-            {
-                configuredCountdownSeconds = settings.DurationCategory switch
-                {
-                    TaskDurationCategory.Short => 3_600,
-                    TaskDurationCategory.Long => 21_600,
-                    _ => 7_200
-                };
-            }
-
-            _balancedCountdownSeconds = Math.Clamp(configuredCountdownSeconds, 0, 86_400);
-            _updatingBalancedCountdown = true;
-            try
-            {
-                _balancedCountdownInput.Value = (decimal)(_balancedCountdownSeconds / 60);
-            }
-            finally
-            {
-                _updatingBalancedCountdown = false;
-            }
-
-            _balancedCountdownEndsAtUtc = settings.BalancedCountdownEndsAtUtc;
-            if (_balancedCountdownEndsAtUtc is null)
-            {
-                _balancedCountdownEndsAtUtc = DateTimeOffset.UtcNow.AddSeconds(_balancedCountdownSeconds);
-            }
+            _durationCategory = settings.DurationCategory;
 
             _balancedDeadlineSoftSeconds = double.IsFinite(settings.BalancedDeadlineSoftSeconds)
                 ? Math.Clamp(settings.BalancedDeadlineSoftSeconds, 0, 300)
                 : BalancedDeadlineEngine.DefaultSoftDeadlineSeconds;
-            _updatingBalancedCountdown = true;
-            try
-            {
-                _balancedSoftDeadlineInput.Value = (decimal)_balancedDeadlineSoftSeconds;
-            }
-            finally
-            {
-                _updatingBalancedCountdown = false;
-            }
+            _balancedSoftDeadlineInput.Value = (decimal)_balancedDeadlineSoftSeconds;
 
             _balancedExpectedOutputTokens = double.IsFinite(settings.BalancedExpectedOutputTokens)
                 ? Math.Clamp(settings.BalancedExpectedOutputTokens, 0, 10_000_000)
-                : 1_000;
+                : BalancedDeadlineEngine.DefaultExpectedOutputTokens;
             _balancedExpectedOutputInput.Value = (decimal)_balancedExpectedOutputTokens;
             _themeCombo.SelectedIndex = settings.Theme switch
             {

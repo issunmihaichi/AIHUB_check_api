@@ -11,11 +11,17 @@ public sealed class PersistentAppSettings
     public string BaseUrl { get; init; } = "https://aihub.top";
     public string Platform { get; init; } = "openai";
     public RoutingMode RoutingMode { get; init; } = RoutingMode.Economy;
-    public TaskDurationCategory DurationCategory { get; init; } = TaskDurationCategory.Medium;
-    public double BalancedCountdownSeconds { get; init; } = 7_200;
-    public DateTimeOffset? BalancedCountdownEndsAtUtc { get; init; }
+    private TaskDurationCategory _durationCategory = TaskDurationCategory.Medium;
+    public TaskDurationCategory DurationCategory
+    {
+        get => _durationCategory;
+        init => _durationCategory = value is TaskDurationCategory.Short or
+            TaskDurationCategory.Medium or TaskDurationCategory.Long
+            ? value
+            : TaskDurationCategory.Medium;
+    }
     public double BalancedDeadlineSoftSeconds { get; init; } = BalancedDeadlineEngine.DefaultSoftDeadlineSeconds;
-    public double BalancedExpectedOutputTokens { get; init; } = 1_000;
+    public double BalancedExpectedOutputTokens { get; init; } = BalancedDeadlineEngine.DefaultExpectedOutputTokens;
     public int MinimumSuccessPercent { get; init; }
     public int PollingIntervalSeconds { get; init; } = 60;
     public int AccountCacheSeconds { get; init; } = 300;
@@ -28,7 +34,7 @@ public sealed class PersistentAppSettings
     public bool ActiveProbeEnabled { get; init; }
     public long? ActiveProbeKeyId { get; init; }
     public string ActiveProbeModel { get; init; } = string.Empty;
-    public int ActiveProbeIntervalSeconds { get; init; } = 60;
+    public int ActiveProbeIntervalSeconds { get; init; } = 90;
 
     public BalancedRoutingPolicy CreatePolicy()
     {

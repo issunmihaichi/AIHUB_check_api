@@ -130,9 +130,6 @@ public sealed class RoutingService : IDisposable
         var observedGroupId = ResolveObservedGroup(selectedKeys);
         var state = _stateStore.Load();
         var basePolicy = _settings.CreatePolicy();
-        var balancedRemainingSeconds = _settings.BalancedCountdownEndsAtUtc is { } countdownEnd
-            ? Math.Max(0, (countdownEnd - now).TotalSeconds)
-            : (double?)null;
         var snapshot = RouteDecisionCoordinator.Evaluate(
             metrics.Providers,
             _cachedGroups,
@@ -141,10 +138,9 @@ public sealed class RoutingService : IDisposable
             _settings.DurationCategory,
             state,
             now,
-            observedGroupId,
-            balancedRemainingSeconds,
-            _settings.BalancedDeadlineSoftSeconds,
-            _settings.BalancedExpectedOutputTokens);
+            observedCurrentGroupId: observedGroupId,
+            balancedDeadlineSoftSeconds: _settings.BalancedDeadlineSoftSeconds,
+            balancedExpectedOutputTokens: _settings.BalancedExpectedOutputTokens);
         var evaluation = snapshot.Evaluation;
         var decisionResult = snapshot.Result;
         var keyResults = new List<KeyRouteResult>();

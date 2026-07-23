@@ -6,7 +6,12 @@ using System.Text.Json.Serialization;
 
 namespace AIHubRouter.Core;
 
-public interface IAIHubApiClient : IDisposable
+public interface IActiveProbeKeyReader
+{
+    Task<IReadOnlyList<ApiKeyInfo>> GetAllKeysAsync(CancellationToken cancellationToken = default);
+}
+
+public interface IAIHubApiClient : IDisposable, IActiveProbeKeyReader
 {
     Task<MonitorSummary> GetProviderSummaryAsync(CancellationToken cancellationToken = default);
     Task<JsonElement> ValidateLoginAsync(CancellationToken cancellationToken = default);
@@ -14,7 +19,6 @@ public interface IAIHubApiClient : IDisposable
     Task<AuthSession> RefreshSessionAsync(string refreshToken, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<GroupInfo>> GetAvailableGroupsAsync(CancellationToken cancellationToken = default);
     Task<IReadOnlyDictionary<long, double>> GetUserGroupRatesAsync(CancellationToken cancellationToken = default);
-    Task<IReadOnlyList<ApiKeyInfo>> GetAllKeysAsync(CancellationToken cancellationToken = default);
     Task<ApiKeyInfo> UpdateKeyGroupAsync(long keyId, long groupId, CancellationToken cancellationToken = default);
 }
 

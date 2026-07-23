@@ -16,9 +16,7 @@ public static class ProviderStatusPresentation
             double.IsFinite(provider.PriceMultiplier) &&
             effectiveMultiplier >= 0 &&
             double.IsFinite(effectiveMultiplier);
-        var isFresh = provider.CheckedAt is { } checkedAt &&
-            now - checkedAt >= TimeSpan.FromMinutes(-1) &&
-            now - checkedAt <= maximumStatusAge;
+        var isFresh = RoutingEngine.HasFreshRoutingEvidence(provider, now, maximumStatusAge);
         return provider.Enabled &&
             provider.Available &&
             isRateValid &&
@@ -41,9 +39,7 @@ public static class ProviderStatusPresentation
             double.IsFinite(provider.PriceMultiplier) &&
             effectiveMultiplier >= 0 &&
             double.IsFinite(effectiveMultiplier);
-        var isFresh = provider.CheckedAt is { } checkedAt &&
-            now - checkedAt >= TimeSpan.FromMinutes(-1) &&
-            now - checkedAt <= maximumStatusAge;
+        var isFresh = RoutingEngine.HasFreshRoutingEvidence(provider, now, maximumStatusAge);
         var state = !provider.Enabled ? "已停用"
             : !provider.Available ? "当前异常"
             : !isRateValid ? "倍率无效"

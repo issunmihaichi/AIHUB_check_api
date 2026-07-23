@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Drawing;
 using AIHubRouter.Core;
 
 namespace AIHubRouter.WinForms;
@@ -7,19 +6,22 @@ namespace AIHubRouter.WinForms;
 internal sealed partial class MainForm
 {
     private long? _keyContextMenuKeyId;
-    private bool _applyingActiveProbeSettings;
 
     private bool IsActiveProbeKey(long keyId) =>
         _activeProbeCheck.Checked && _activeProbeKeyId == keyId;
 
     private void HandleActiveProbeEnabledChanged()
     {
-        if (_applyingActiveProbeSettings)
+        if (_applyingRoutingSettings)
         {
             return;
         }
 
         ApplyActiveProbeConfigurationChanged();
+        if (_activeProbeCheck.Checked && !TryCreateActiveProbeConfiguration(out _, out var error))
+        {
+            SetStatus(error, success: false);
+        }
     }
 
     private void ApplyActiveProbeConfigurationChanged()
@@ -34,7 +36,7 @@ internal sealed partial class MainForm
             RecalculateCandidate();
         }
 
-        if (!_persistCredentialsCheck.Checked)
+        if (!_persistCredentialsCheck.Checked || _keys.Count == 0)
         {
             SaveCurrentSettings(showStatus: false);
         }
@@ -58,19 +60,19 @@ internal sealed partial class MainForm
         configuration = null;
         if (_activeProbeKeyId is not > 0)
         {
-            error = "请先设置专用测速 Key ID。";
+            error = "请先设置要检查的 Key ID。";
             return false;
         }
 
         if (string.IsNullOrWhiteSpace(_activeProbeApiKey))
         {
-            error = "请在测速设置中填写该专用 Key 的 API Key。";
+            error = "请在健康检查设置中填写该 Key 的 API Key。";
             return false;
         }
 
         if (string.IsNullOrWhiteSpace(_activeProbeModel))
         {
-            error = "请在测速设置中填写测试模型。";
+            error = "请在健康检查设置中填写测试模型。";
             return false;
         }
 
@@ -93,13 +95,15 @@ internal sealed partial class MainForm
         }
     }
 
-    private async Task ExecuteActiveProbeAsync(bool manual)
+    private async Task ExecuteActiveProbeAsync(
+        bool manual,
+        CancellationToken externalCancellationToken = default)
     {
         if (_busy)
         {
             if (manual)
             {
-                SetStatus("当前有任务正在运行，稍后再执行测速。", success: false);
+                SetStatus("当前有任务正在运行，稍后再执行健康检查。", success: false);
             }
 
             return;
@@ -120,53 +124,41 @@ internal sealed partial class MainForm
         {
             if (manual)
             {
-                SetStatus("主动测速需要有效的 AIHub 登录认证，才能临时切换专用测速 Key 的分组。", success: false);
+                SetStatus("Key 健康检查需要有效的 AIHub 登录认证，用于读取该 Key 当前所在分组。", success: false);
             }
 
             return;
         }
 
-        SetBusy(true, "正在通过专用 Key 测量各节点的首 Token 延迟...");
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            _shutdown.Token,
+            externalCancellationToken);
+        _activeProbeCancellation = cancellation;
+        _activeProbeTimer.Stop();
+        SetBusy(true, "正在检查指定 Key 是否存活...");
         try
         {
             await RunAuthenticatedAsync(async accountClient =>
             {
-                await RefreshDataCoreAsync(accountClient, loadAccountData: true, _shutdown.Token);
-
                 using var upstream = new OpenAiStreamingProbeClient();
                 var service = new ActiveProviderProbeService(upstream);
-                var result = await service.RunCycleAsync(
+                var result = await service.CheckSelectedKeyAsync(
                     accountClient,
                     configuration!,
-                    _summary?.Apis ?? [],
-                    _groups,
-                    _providerBlocklist,
-                    _shutdown.Token);
-                var measurements = result.Results
-                    .Where(item => item.Success && item.Measurement is not null)
-                    .Select(item => item.Measurement!)
-                    .ToArray();
-
-                if (measurements.Length > 0)
-                {
-                    var metrics = _providerMetrics.RecordActiveProbes(measurements);
-                    var currentSummary = _summary;
-                    _summary = new MonitorSummary
-                    {
-                        Apis = metrics.Providers.ToList(),
-                        GeneratedAt = currentSummary?.GeneratedAt,
-                        MonitoringActive = currentSummary?.MonitoringActive ?? false
-                    };
-                    _userRates = metrics.UserGroupRates;
-                    RecalculateCandidate();
-                }
-
-                var failed = result.Results.Count(item => !item.Success);
-                var status = result.Results.Count == 0
-                    ? "没有符合条件的可测速节点。"
-                    : $"主动测速完成：{measurements.Length} 个节点已更新，{failed} 个节点本轮失败。";
-                SetStatus(status, success: measurements.Length > 0 && result.TestKeyRestored);
-            });
+                    cancellation.Token);
+                cancellation.Token.ThrowIfCancellationRequested();
+                var status = result.Success && result.Measurement is { } measurement
+                    ? $"Key {configuration!.TestKeyId} 存活，当前分组 {result.GroupId}，首 Token {measurement.FirstTokenLatencyMs:0} ms。"
+                    : $"Key {configuration!.TestKeyId} 健康检查失败（当前分组 {result.GroupId}）。";
+                SetStatus(status, success: result.Success);
+            }, cancellation.Token);
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            if (!_shutdown.IsCancellationRequested)
+            {
+                SetStatus("本轮健康检查已取消。", success: true);
+            }
         }
         catch (Exception exception)
         {
@@ -174,132 +166,31 @@ internal sealed partial class MainForm
         }
         finally
         {
+            if (ReferenceEquals(_activeProbeCancellation, cancellation))
+            {
+                _activeProbeCancellation = null;
+            }
+
             SetBusy(false);
+            if (!_shutdown.IsCancellationRequested)
+            {
+                UpdateActiveProbeTimer();
+            }
         }
     }
 
-    private void ShowActiveProbeSettings()
+    private void CancelActiveProbe()
     {
-        using var dialog = new Form
-        {
-            Text = "主动测速设置",
-            StartPosition = FormStartPosition.CenterParent,
-            FormBorderStyle = FormBorderStyle.FixedDialog,
-            MinimizeBox = false,
-            MaximizeBox = false,
-            ShowInTaskbar = false,
-            ClientSize = new Size(610, 330)
-        };
-        var enabled = new CheckBox
-        {
-            Text = "每 60 秒主动测速当前平台的可用节点",
-            AutoSize = true,
-            Checked = _activeProbeCheck.Checked
-        };
-        var keyId = new NumericUpDown
-        {
-            Dock = DockStyle.Fill,
-            Minimum = 0,
-            Maximum = 1_000_000_000,
-            Value = Math.Clamp(_activeProbeKeyId ?? 0, 0, 1_000_000_000)
-        };
-        var apiKey = new TextBox
-        {
-            Dock = DockStyle.Fill,
-            UseSystemPasswordChar = true,
-            PlaceholderText = "专用测速 Key 的 sk-... 值",
-            Text = _activeProbeApiKey
-        };
-        var model = new TextBox
-        {
-            Dock = DockStyle.Fill,
-            PlaceholderText = "例如 gpt-4.1-mini",
-            Text = _activeProbeModel
-        };
-        var showApiKey = new CheckBox { Text = "显示 API Key", AutoSize = true };
-        showApiKey.CheckedChanged += (_, _) => apiKey.UseSystemPasswordChar = !showApiKey.Checked;
-
-        var layout = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            Padding = new Padding(14),
-            ColumnCount = 2,
-            RowCount = 6
-        };
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 122));
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 44));
-        layout.Controls.Add(enabled, 0, 0);
-        layout.SetColumnSpan(enabled, 2);
-        AddProbeDialogRow(layout, 1, "专用 Key ID", keyId);
-
-        var apiKeyPanel = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = false,
-            Margin = new Padding(0, 3, 0, 3)
-        };
-        apiKeyPanel.Controls.Add(apiKey);
-        apiKeyPanel.Controls.Add(showApiKey);
-        layout.Controls.Add(CreateProbeDialogLabel("上游 API Key"), 0, 2);
-        layout.Controls.Add(apiKeyPanel, 1, 2);
-        AddProbeDialogRow(layout, 3, "测试模型", model);
-        layout.Controls.Add(new Label
-        {
-            Dock = DockStyle.Fill,
-            AutoSize = false,
-            Text = "该 Key 会被逐个临时切换至节点分组，发送 max_tokens=1 的流式请求后恢复原分组。它不会参与普通路由；右键 Key 表中的项目也可快速填入 Key ID。\r\n\r\n开启常态化保存认证后，测速 API Key 与登录凭据一起使用 Windows DPAPI 加密保存。",
-            ForeColor = Color.FromArgb(75, 85, 95)
-        }, 0, 4);
-        layout.SetColumnSpan(layout.GetControlFromPosition(0, 4)!, 2);
-
-        var buttons = new FlowLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.RightToLeft,
-            WrapContents = false,
-            Padding = new Padding(0, 8, 0, 0)
-        };
-        var save = new Button { Text = "应用", AutoSize = true, DialogResult = DialogResult.OK };
-        var cancel = new Button { Text = "取消", AutoSize = true, DialogResult = DialogResult.Cancel };
-        buttons.Controls.Add(save);
-        buttons.Controls.Add(cancel);
-        layout.Controls.Add(buttons, 0, 5);
-        layout.SetColumnSpan(buttons, 2);
-        dialog.Controls.Add(layout);
-        dialog.AcceptButton = save;
-        dialog.CancelButton = cancel;
-        NativeThemeManager.Apply(dialog, _activePalette);
-
-        if (dialog.ShowDialog(this) != DialogResult.OK)
+        var cancellation = _activeProbeCancellation;
+        if (cancellation is null || cancellation.IsCancellationRequested)
         {
             return;
         }
 
-        _applyingActiveProbeSettings = true;
-        try
-        {
-            _activeProbeKeyId = (long)keyId.Value;
-            _activeProbeApiKey = apiKey.Text.Trim();
-            _activeProbeModel = model.Text.Trim();
-            _activeProbeCheck.Checked = enabled.Checked;
-        }
-        finally
-        {
-            _applyingActiveProbeSettings = false;
-        }
-
-        ApplyActiveProbeConfigurationChanged();
-        SetStatus(_activeProbeCheck.Checked && !TryCreateActiveProbeConfiguration(out _, out var error)
-            ? error
-            : "主动测速设置已保存。",
-            success: !_activeProbeCheck.Checked || TryCreateActiveProbeConfiguration(out _, out _));
+        _cancelActiveProbeButton.Enabled = false;
+        _statusLabel.Text = "正在取消健康检查...";
+        _statusLabel.ForeColor = _activePalette.MutedText;
+        cancellation.Cancel();
     }
 
     private void HandleKeyGridMouseDown(object? sender, MouseEventArgs eventArgs)
@@ -341,8 +232,8 @@ internal sealed partial class MainForm
         }
 
         _setActiveProbeKeyMenuItem.Text = _activeProbeKeyId == _keyContextMenuKeyId
-            ? $"已设为测速 Key（ID {_keyContextMenuKeyId.Value}）"
-            : $"设为测速专用 Key（ID {_keyContextMenuKeyId.Value}）";
+            ? $"已设为健康检查 Key（ID {_keyContextMenuKeyId.Value}）"
+            : $"设为健康检查 Key（ID {_keyContextMenuKeyId.Value}）";
         _setActiveProbeKeyMenuItem.Enabled = _activeProbeKeyId != _keyContextMenuKeyId;
     }
 
@@ -355,21 +246,7 @@ internal sealed partial class MainForm
 
         _activeProbeKeyId = _keyContextMenuKeyId;
         ApplyActiveProbeConfigurationChanged();
-        SetStatus($"已设置测速专用 Key ID {_keyContextMenuKeyId.Value}；请在测速设置中填写其 API Key 和测试模型。", success: true);
+        SetStatus($"已设置健康检查 Key ID {_keyContextMenuKeyId.Value}；请在健康检查设置中填写其 API Key 和测试模型。", success: true);
     }
 
-    private static Label CreateProbeDialogLabel(string text) => new()
-    {
-        Text = text,
-        Dock = DockStyle.Fill,
-        TextAlign = ContentAlignment.MiddleLeft,
-        ForeColor = Color.FromArgb(55, 65, 75)
-    };
-
-    private static void AddProbeDialogRow(TableLayoutPanel table, int row, string label, Control input)
-    {
-        input.Margin = new Padding(0, 3, 0, 3);
-        table.Controls.Add(CreateProbeDialogLabel(label), 0, row);
-        table.Controls.Add(input, 1, row);
-    }
 }

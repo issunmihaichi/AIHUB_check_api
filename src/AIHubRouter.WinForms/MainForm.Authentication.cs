@@ -57,7 +57,11 @@ internal sealed partial class MainForm
         {
             _applyingSessionCredentials = false;
         }
-        if (_persistCredentialsCheck.Checked && !SaveCurrentSettings(showStatus: false))
+        if (RoutingPersistencePolicy.ShouldPersistCredentials(
+                _persistCredentialsCheck.Checked,
+                _applyingRoutingSettings,
+                _suppressRoutingPersistence) &&
+            !SaveCurrentSettings(showStatus: false))
         {
             throw new InvalidOperationException("Session refreshed but encrypted persistence failed.");
         }
@@ -68,6 +72,7 @@ internal sealed partial class MainForm
     private void ResetAuthenticationAndRoutingService()
     {
         _currentSession = null;
+        _hasAuthenticatedAccountData = false;
         _providerMetrics.Clear();
         InvalidateRoutingService();
     }
@@ -100,8 +105,11 @@ internal sealed partial class MainForm
             !string.IsNullOrWhiteSpace(_passwordText.Text);
     }
 
-    private async Task<AIHubClient> CreateAuthenticatedClientAsync(bool forceRenew)
+    private async Task<AIHubClient> CreateAuthenticatedClientAsync(
+        bool forceRenew,
+        CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var credentials = new LoginCredentials(_emailText.Text.Trim(), _passwordText.Text);
         var canUseSessionCoordinator = credentials.IsComplete ||
             !string.IsNullOrWhiteSpace(_currentSession?.RefreshToken);
@@ -123,7 +131,7 @@ internal sealed partial class MainForm
             sessionClient.RefreshSessionAsync,
             sessionClient.LoginAsync,
             PersistSessionAsync);
-        var session = await coordinator.GetSessionAsync(_currentSession, credentials, _shutdown.Token);
+        var session = await coordinator.GetSessionAsync(_currentSession, credentials, cancellationToken);
         _currentSession = session;
         _tokenText.Text = session.AccessToken;
         return new AIHubClient(
@@ -146,7 +154,11 @@ internal sealed partial class MainForm
         {
             _applyingSessionCredentials = false;
         }
-        if (_persistCredentialsCheck.Checked && !SaveCurrentSettings(showStatus: false))
+        if (RoutingPersistencePolicy.ShouldPersistCredentials(
+                _persistCredentialsCheck.Checked,
+                _applyingRoutingSettings,
+                _suppressRoutingPersistence) &&
+            !SaveCurrentSettings(showStatus: false))
         {
             throw new InvalidOperationException("认证 session 已更新，但加密保存失败。");
         }
@@ -154,22 +166,45 @@ internal sealed partial class MainForm
         return Task.CompletedTask;
     }
 
-    private async Task RunAuthenticatedAsync(Func<AIHubClient, Task> operation)
+    private Task RunAuthenticatedAsync(Func<AIHubClient, Task> operation) =>
+        RunAuthenticatedAsync(operation, _shutdown.Token);
+
+    private async Task RunAuthenticatedAsync(
+        Func<AIHubClient, Task> operation,
+        CancellationToken cancellationToken)
     {
         for (var attempt = 0; attempt < 2; attempt++)
         {
-            using var client = await CreateAuthenticatedClientAsync(forceRenew: attempt > 0);
+            cancellationToken.ThrowIfCancellationRequested();
+            AIHubClient client;
             try
             {
-                await operation(client);
-                return;
+                client = await CreateAuthenticatedClientAsync(forceRenew: attempt > 0, cancellationToken);
             }
-            catch (AIHubApiException exception)
-                when (exception.IsAuthenticationFailure &&
-                    attempt == 0 &&
-                    CanRenewAutomatically())
+            catch (AIHubApiException) when (cancellationToken.IsCancellationRequested)
             {
-                InvalidateCurrentSession();
+                throw new OperationCanceledException(cancellationToken);
+            }
+
+            using (client)
+            {
+                try
+                {
+                    await operation(client);
+                    return;
+                }
+                catch (AIHubApiException) when (cancellationToken.IsCancellationRequested)
+                {
+                    throw new OperationCanceledException(cancellationToken);
+                }
+                catch (AIHubApiException exception)
+                    when (exception.IsAuthenticationFailure &&
+                        attempt == 0 &&
+                        CanRenewAutomatically())
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    InvalidateCurrentSession();
+                }
             }
         }
     }

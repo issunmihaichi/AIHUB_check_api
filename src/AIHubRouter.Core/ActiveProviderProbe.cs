@@ -76,6 +76,10 @@ public sealed record ActiveProbeCycleResult(
     IReadOnlyList<ActiveProbeResult> Results,
     bool TestKeyRestored);
 
+public sealed class ActiveProbeRestoreException(Exception innerException) : InvalidOperationException(
+    "The dedicated active-probe Key could not be restored.",
+    innerException);
+
 public interface IUpstreamProbeClient : IDisposable
 {
     Task<ActiveProbeMeasurement> ProbeAsync(ActiveProbeRequest request, CancellationToken cancellationToken);
@@ -229,6 +233,49 @@ public sealed class ActiveProviderProbeService
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
     }
 
+    public async Task<ActiveProbeResult> CheckSelectedKeyAsync(
+        IActiveProbeKeyReader accountClient,
+        ActiveProbeConfiguration configuration,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(accountClient);
+        ArgumentNullException.ThrowIfNull(configuration);
+        configuration.Validate();
+
+        var keys = await accountClient.GetAllKeysAsync(cancellationToken);
+        var testKey = keys.SingleOrDefault(key => key.Id == configuration.TestKeyId);
+        if (testKey is null || !testKey.Status.Equals("active", StringComparison.OrdinalIgnoreCase) || testKey.GroupId is not { } groupId)
+        {
+            throw new InvalidOperationException("The selected health-check Key is not an active routed Key.");
+        }
+
+        try
+        {
+            var measurement = await _upstream.ProbeAsync(
+                new ActiveProbeRequest(
+                    configuration.BaseUrl,
+                    configuration.ApiKey,
+                    configuration.Model,
+                    configuration.Platform,
+                    groupId),
+                cancellationToken);
+            measurement.Validate();
+            return new ActiveProbeResult(
+                groupId,
+                true,
+                measurement with { ObservedAt = _utcNow() },
+                "ok");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return new ActiveProbeResult(groupId, false, null, "probe-failed");
+        }
+    }
+
     public async Task<ActiveProbeCycleResult> RunCycleAsync(
         IAIHubApiClient accountClient,
         ActiveProbeConfiguration configuration,
@@ -257,6 +304,7 @@ public sealed class ActiveProviderProbeService
         }
 
         var currentGroupId = originalGroupId;
+        var remoteGroupMayHaveChanged = false;
         var results = new List<ActiveProbeResult>(selectedGroups.Length);
         var restored = false;
         try
@@ -268,8 +316,10 @@ public sealed class ActiveProviderProbeService
                 {
                     if (currentGroupId != group.Id)
                     {
+                        remoteGroupMayHaveChanged = true;
                         await accountClient.UpdateKeyGroupAsync(testKey.Id, group.Id, cancellationToken);
                         currentGroupId = group.Id;
+                        remoteGroupMayHaveChanged = false;
                     }
 
                     var measurement = await _upstream.ProbeAsync(
@@ -295,9 +345,16 @@ public sealed class ActiveProviderProbeService
         }
         finally
         {
-            if (currentGroupId != originalGroupId)
+            if (remoteGroupMayHaveChanged || currentGroupId != originalGroupId)
             {
-                await accountClient.UpdateKeyGroupAsync(testKey.Id, originalGroupId, CancellationToken.None);
+                try
+                {
+                    await accountClient.UpdateKeyGroupAsync(testKey.Id, originalGroupId, CancellationToken.None);
+                }
+                catch (Exception exception)
+                {
+                    throw new ActiveProbeRestoreException(exception);
+                }
             }
 
             restored = true;

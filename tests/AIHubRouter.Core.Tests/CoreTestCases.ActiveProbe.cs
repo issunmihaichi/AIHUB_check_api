@@ -41,6 +41,57 @@ internal static partial class CoreTestCases
             "Active probe did not send the test API Key as Bearer authentication.");
     }
 
+    internal static void TestActiveProbeChecksSelectedKeyWithoutChangingGroup()
+    {
+        var now = new DateTimeOffset(2026, 7, 23, 8, 0, 0, TimeSpan.Zero);
+        var account = new StubRoutingClient(now);
+        ActiveProbeRequest? observedRequest = null;
+        var upstream = new StubUpstreamProbeClient(request =>
+        {
+            observedRequest = request;
+            return Task.FromResult(new ActiveProbeMeasurement(
+                request.Platform,
+                request.GroupId,
+                now,
+                180));
+        });
+        var service = new ActiveProviderProbeService(upstream, () => now);
+
+        var result = service.CheckSelectedKeyAsync(
+                account,
+                new ActiveProbeConfiguration("https://example.test", "probe-key-value", "probe-model", 10, "openai"),
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+
+        Assert(result.Success && result.Measurement?.GroupId == 1,
+            "Selected-Key health check did not return the current Key group measurement.");
+        Assert(observedRequest?.GroupId == 1,
+            "Selected-Key health check did not probe the selected Key's current group.");
+        Assert(account.UpdateCalls == 0,
+            "Selected-Key health check changed the selected Key's group.");
+    }
+
+    internal static void TestActiveProbeHealthFailureDoesNotChangeSelectedKeyGroup()
+    {
+        var now = new DateTimeOffset(2026, 7, 23, 8, 0, 0, TimeSpan.Zero);
+        var account = new StubRoutingClient(now);
+        var upstream = new StubUpstreamProbeClient(_ =>
+            Task.FromException<ActiveProbeMeasurement>(new HttpRequestException("synthetic probe failure")));
+        var service = new ActiveProviderProbeService(upstream, () => now);
+
+        var result = service.CheckSelectedKeyAsync(
+                account,
+                new ActiveProbeConfiguration("https://example.test", "probe-key-value", "probe-model", 10, "openai"),
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+
+        Assert(!result.Success, "A failed selected-Key health check was reported as successful.");
+        Assert(account.UpdateCalls == 0,
+            "A failed selected-Key health check changed the selected Key's group.");
+    }
+
     internal static void TestActiveProbeRestoresTestKeyAfterCycle()
     {
         var now = new DateTimeOffset(2026, 7, 23, 8, 0, 0, TimeSpan.Zero);
@@ -104,6 +155,104 @@ internal static partial class CoreTestCases
             "The test Key was not restored after an upstream probe failure.");
     }
 
+    internal static void TestActiveProbeRestoresTestKeyAfterCanceledRemoteSwitch()
+    {
+        var now = new DateTimeOffset(2026, 7, 23, 8, 0, 0, TimeSpan.Zero);
+        using var cancellation = new CancellationTokenSource();
+        var account = new StubRoutingClient(now)
+        {
+            ProvidersOverride = [Provider(2, 0.01, true, 1, now)],
+            GroupsOverride = [Group(1), Group(2)],
+            AfterRemoteKeyGroupUpdate = (_, groupId, token) =>
+            {
+                if (groupId == 2)
+                {
+                    cancellation.Cancel();
+                    throw new OperationCanceledException(token);
+                }
+
+                if (groupId == 1)
+                {
+                    Assert(!token.CanBeCanceled,
+                        "The canceled active-probe cycle restored the test Key with a cancelable token.");
+                }
+            }
+        };
+        var upstream = new StubUpstreamProbeClient(_ =>
+            Task.FromResult(new ActiveProbeMeasurement("openai", 2, now, 200)));
+        var service = new ActiveProviderProbeService(upstream, () => now);
+
+        var canceled = false;
+        try
+        {
+            service.RunCycleAsync(
+                    account,
+                    new ActiveProbeConfiguration("https://example.test", "probe-key-value", "probe-model", 10, "openai"),
+                    account.ProvidersOverride,
+                    account.GroupsOverride,
+                    ProviderBlocklist.Empty,
+                    cancellation.Token)
+                .GetAwaiter()
+                .GetResult();
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            canceled = true;
+        }
+
+        Assert(canceled, "The canceled active-probe cycle did not surface cancellation.");
+        Assert(account.UpdatedGroupIds.SequenceEqual(new long[] { 2, 1 }),
+            "The test Key was not restored after a canceled request whose remote switch succeeded.");
+    }
+
+    internal static void TestActiveProbeSurfacesRestoreTimeoutAfterCancellation()
+    {
+        var now = new DateTimeOffset(2026, 7, 23, 8, 0, 0, TimeSpan.Zero);
+        using var cancellation = new CancellationTokenSource();
+        var account = new StubRoutingClient(now)
+        {
+            ProvidersOverride = [Provider(2, 0.01, true, 1, now)],
+            GroupsOverride = [Group(1), Group(2)],
+            AfterRemoteKeyGroupUpdate = (_, groupId, token) =>
+            {
+                if (groupId == 2)
+                {
+                    cancellation.Cancel();
+                    throw new OperationCanceledException(token);
+                }
+
+                if (groupId == 1)
+                {
+                    throw new OperationCanceledException("synthetic restore timeout");
+                }
+            }
+        };
+        var upstream = new StubUpstreamProbeClient(_ =>
+            Task.FromResult(new ActiveProbeMeasurement("openai", 2, now, 200)));
+        var service = new ActiveProviderProbeService(upstream, () => now);
+
+        Exception? failure = null;
+        try
+        {
+            service.RunCycleAsync(
+                    account,
+                    new ActiveProbeConfiguration("https://example.test", "probe-key-value", "probe-model", 10, "openai"),
+                    account.ProvidersOverride,
+                    account.GroupsOverride,
+                    ProviderBlocklist.Empty,
+                    cancellation.Token)
+                .GetAwaiter()
+                .GetResult();
+        }
+        catch (Exception exception)
+        {
+            failure = exception;
+        }
+
+        Assert(failure is InvalidOperationException { InnerException: OperationCanceledException },
+            "A timeout while restoring the test Key was reported as an ordinary cancellation.");
+    }
+
     internal static void TestActiveProbeMetricsOverrideReportedLatency()
     {
         var now = new DateTimeOffset(2026, 7, 23, 8, 0, 0, TimeSpan.Zero);
@@ -142,7 +291,7 @@ internal static partial class CoreTestCases
                     ActiveProbeEnabled = true,
                     ActiveProbeKeyId = 10,
                     ActiveProbeModel = "probe-model",
-                    ActiveProbeIntervalSeconds = 60
+                    ActiveProbeIntervalSeconds = 90
                 },
                 new PersistentCredentials { ActiveProbeApiKey = probeKey });
 
@@ -151,6 +300,8 @@ internal static partial class CoreTestCases
             Assert(!settingsText.Contains(probeKey, StringComparison.Ordinal), "Test API Key was written to plain settings.");
             Assert(loaded.Settings.ActiveProbeEnabled && loaded.Settings.ActiveProbeKeyId == 10,
                 "Active probe settings did not roundtrip.");
+            Assert(loaded.Settings.ActiveProbeIntervalSeconds == 90,
+                "Selected-Key health-check interval did not roundtrip.");
             Assert(loaded.Credentials?.ActiveProbeApiKey == probeKey, "Encrypted test API Key did not roundtrip.");
         }
         finally

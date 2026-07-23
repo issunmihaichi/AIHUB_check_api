@@ -12,6 +12,8 @@ public static class SafeErrorPresentation
         {
             InteractiveAuthenticationRequiredException =>
                 "当前账号需要验证码或两步验证，请先在 AIHub 网页完成登录验证。",
+            ActiveProbeRestoreException =>
+                "测速专用 Key 未能恢复原分组，已停止自动测速。请确认 AIHub 控制台中的 Key 分组后重试。",
             AIHubApiException apiException => GetApiMessage(apiException),
             HttpRequestException => "网络连接失败，请检查站点地址和网络。",
             TaskCanceledException => "请求超时，请稍后重试。",

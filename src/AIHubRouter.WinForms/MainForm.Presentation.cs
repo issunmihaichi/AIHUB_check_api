@@ -42,7 +42,6 @@ internal sealed partial class MainForm
             RouteDecisionReason.BalancedDeadlineSwitched => "均衡：当前节点超时，切换到满足截止时间的最低成本节点",
             RouteDecisionReason.BalancedDeadlineFastestFallback => "均衡：没有节点满足截止时间，切换到最快节点",
             RouteDecisionReason.BalancedDeadlineNoFeasibleCandidate => "均衡：没有节点满足截止时间，保持当前路线",
-            RouteDecisionReason.BalancedCountdownExpired => "均衡倒计时结束：已切换为严格经济模式",
             RouteDecisionReason.NoCandidate => "没有符合条件的路由",
             RouteDecisionReason.InitialRoute => "建立初始路由",
             RouteDecisionReason.CurrentRouteInvalid => "当前路由已不可用",
@@ -59,6 +58,7 @@ internal sealed partial class MainForm
             RouteDecisionReason.AdaptiveCostRejected => "净省不足或新节点过慢",
             RouteDecisionReason.AdaptiveBalancedRejected => "净省、时间或降价未达标",
             RouteDecisionReason.AdaptiveSpeedRejected => "速度提升不足或涨价过多",
+            RouteDecisionReason.ForcedGroupSelected => "用户强制分组优先，保持到节点不可用",
             RouteDecisionReason.AdaptiveUnknownPreference => "未知路由偏好",
             _ => "路由评估完成"
         };
@@ -124,9 +124,10 @@ internal sealed partial class MainForm
         _refreshButton.Enabled = !busy;
         _simulateButton.Enabled = !busy;
         _routeNowButton.Enabled = !busy;
-        _activeProbeCheck.Enabled = !busy;
-        _activeProbeSettingsButton.Enabled = !busy;
-        _runActiveProbeButton.Enabled = !busy;
+        _routingSettingsButton.Enabled = !busy;
+        _cancelActiveProbeButton.Visible = _activeProbeCancellation is not null;
+        _cancelActiveProbeButton.Enabled = _activeProbeCancellation is { IsCancellationRequested: false };
+        _providerContextMenu.Enabled = !busy;
         _progressBar.Visible = busy;
         if (message is not null)
         {

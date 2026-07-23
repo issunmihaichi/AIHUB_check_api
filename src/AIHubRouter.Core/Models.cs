@@ -280,7 +280,8 @@ public enum RouteDecisionReason
     BalancedCountdownExpired,
     PolicySwitchCoolingDown,
     PolicySwitchAwaitingEvaluations,
-    PolicyCandidateNotStable
+    PolicyCandidateNotStable,
+    ForcedGroupSelected
 }
 
 public enum RouteSwitchClass
@@ -288,7 +289,8 @@ public enum RouteSwitchClass
     None,
     Initial,
     ForcedRecovery,
-    Policy
+    Policy,
+    ManualOverride
 }
 
 public sealed record RouteDecision(
@@ -323,6 +325,7 @@ public sealed record AdaptiveRoutingContext(
     RoutingMode BaseMode,
     TaskDurationCategory DurationCategory,
     double? CurrentIntervalSeconds,
+    [property: Obsolete("Legacy countdown value is ignored; Balanced mode always uses Deadline routing.")]
     double? BalancedRemainingSeconds = null,
     double? BalancedDeadlineSoftSeconds = null,
     double? BalancedExpectedOutputTokens = null);
@@ -330,8 +333,18 @@ public sealed record AdaptiveRoutingContext(
 public sealed record RouteState
 {
     public long? CurrentGroupId { get; init; }
+    public long? ForcedGroupId { get; init; }
     public DateTimeOffset? LastPolicySwitchAt { get; init; }
     public int CompletedPolicyEvaluationsSinceLastSwitch { get; init; }
     public long? PendingPolicyTargetGroupId { get; init; }
     public int PendingPolicyTargetObservations { get; init; }
+
+    public RouteState ReleaseForcedGroup() => this with
+    {
+        ForcedGroupId = null,
+        LastPolicySwitchAt = null,
+        CompletedPolicyEvaluationsSinceLastSwitch = 0,
+        PendingPolicyTargetGroupId = null,
+        PendingPolicyTargetObservations = 0
+    };
 }

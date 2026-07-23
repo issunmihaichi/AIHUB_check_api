@@ -26,7 +26,7 @@ public static class RoutingEngine
             .Where(provider => !blocklist.IsBlocked(provider, groups[provider.GroupId!.Value]))
             .Where(provider => provider.Platform.Equals(criteria.Platform, StringComparison.OrdinalIgnoreCase))
             .Where(provider => provider.PriceMultiplier >= 0 && double.IsFinite(provider.PriceMultiplier))
-            .Where(provider => IsFresh(provider.CheckedAt, now, criteria.MaximumStatusAge))
+            .Where(provider => HasFreshRoutingEvidence(provider, now, criteria.MaximumStatusAge))
             .Where(provider => (provider.SuccessRate6h ?? 0) >= criteria.MinimumSuccessRate6h)
             .Select(provider =>
             {
@@ -75,7 +75,7 @@ public static class RoutingEngine
             .Where(provider => !blocklist.IsBlocked(provider, groups[provider.GroupId!.Value]))
             .Where(provider => provider.Platform.Equals(policy.Platform, StringComparison.OrdinalIgnoreCase))
             .Where(provider => provider.PriceMultiplier >= 0 && double.IsFinite(provider.PriceMultiplier))
-            .Where(provider => IsFresh(provider.CheckedAt, now, policy.MaximumStatusAge))
+            .Where(provider => HasFreshRoutingEvidence(provider, now, policy.MaximumStatusAge))
             .Where(provider => (provider.SuccessRate6h ?? 0) >= policy.MinimumSuccessRate6h)
             .Select(provider =>
             {
@@ -161,6 +161,16 @@ public static class RoutingEngine
 
     private static bool IsKnownLatency(double? latency) =>
         latency is > 0 && double.IsFinite(latency.Value);
+
+    internal static bool HasFreshRoutingEvidence(
+        ProviderStatus provider,
+        DateTimeOffset now,
+        TimeSpan maximumAge)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        return IsKnownLatency(provider.FirstTokenLatencyMs) ||
+            IsFresh(provider.CheckedAt, now, maximumAge);
+    }
 
     private static bool NearlyEqual(double left, double right) =>
         Math.Abs(left - right) <= 1e-12;

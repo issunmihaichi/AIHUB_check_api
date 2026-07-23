@@ -148,6 +148,12 @@ try {
         "-c", "Release"
     )
     Invoke-DotNet @(
+        "run",
+        "--project", (Join-Path $repoRoot "tests\AIHubRouter.WinForms.Tests\AIHubRouter.WinForms.Tests.csproj"),
+        "--no-restore",
+        "-c", "Release"
+    )
+    Invoke-DotNet @(
         "restore",
         (Join-Path $repoRoot "src\AIHubRouter.WinForms\AIHubRouter.WinForms.csproj"),
         "--configfile", $configFile,

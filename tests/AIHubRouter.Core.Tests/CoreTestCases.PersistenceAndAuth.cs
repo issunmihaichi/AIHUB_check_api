@@ -129,6 +129,10 @@ internal static partial class CoreTestCases
             "Publish script has no checked dotnet wrapper.");
         Assert(!script.Split('\n').Any(line => line.TrimStart().StartsWith("dotnet ", StringComparison.OrdinalIgnoreCase)),
             "Publish script contains an unchecked dotnet command.");
+        Assert(script.Contains(
+                @"tests\AIHubRouter.WinForms.Tests\AIHubRouter.WinForms.Tests.csproj",
+                StringComparison.Ordinal),
+            "Publish script does not run the WinForms regression tests.");
     }
 
     internal static void TestEncryptedSettingsRoundtrip()

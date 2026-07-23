@@ -122,6 +122,7 @@ internal sealed class StubRoutingClient(DateTimeOffset now) : IAIHubApiClient
     public double? UserRateOverride { get; init; }
     public IReadOnlyList<ProviderStatus>? ProvidersOverride { get; init; }
     public IReadOnlyList<GroupInfo>? GroupsOverride { get; init; }
+    public Action<long, long, CancellationToken>? AfterRemoteKeyGroupUpdate { get; init; }
 
     public Task<MonitorSummary> GetProviderSummaryAsync(CancellationToken cancellationToken = default)
     {
@@ -190,6 +191,7 @@ internal sealed class StubRoutingClient(DateTimeOffset now) : IAIHubApiClient
     {
         UpdateCalls++;
         UpdatedGroupIds.Add(groupId);
+        AfterRemoteKeyGroupUpdate?.Invoke(keyId, groupId, cancellationToken);
         if (UpdateCalls <= FailUpdateCount)
         {
             throw new InvalidOperationException("synthetic update failure");
