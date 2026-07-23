@@ -8,6 +8,210 @@ namespace AIHubRouter.Core.Tests;
 
 internal static partial class CoreTestCases
 {
+    internal static void TestEvidenceWeightDecayBoundaries()
+    {
+        var now = new DateTimeOffset(2026, 7, 22, 9, 0, 0, TimeSpan.Zero);
+        var maximumAge = TimeSpan.FromMinutes(30);
+
+        Assert(Math.Abs(RoutingEngine.CalculateEvidenceWeight(now.AddMinutes(-30), now, maximumAge) - 1) < 0.000001,
+            "Evidence at the thirty-minute freshness boundary was downweighted.");
+        Assert(Math.Abs(RoutingEngine.CalculateEvidenceWeight(now.AddMinutes(-60), now, maximumAge) - 0.5) < 0.000001,
+            "Sixty-minute evidence did not receive half weight.");
+        Assert(Math.Abs(RoutingEngine.CalculateEvidenceWeight(now.AddHours(-8), now, maximumAge) - 0.25) < 0.000001,
+            "Eight-hour evidence did not use the quarter-weight floor.");
+        Assert(Math.Abs(RoutingEngine.CalculateEvidenceWeight(now.AddMinutes(5), now, maximumAge) - 1) < 0.000001,
+            "A future evidence timestamp produced a weight other than one.");
+        Assert(Math.Abs(RoutingEngine.CalculateEvidenceWeight(null, now, maximumAge) - 0.25) < 0.000001,
+            "Missing timestamps did not use the performance-evidence floor.");
+    }
+
+    internal static void TestRouteCandidateDefaultsEvidenceWeight()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var candidate = new RouteCandidate(
+            Provider(1, 0.01, available: true, success: 1, checkedAt: now),
+            Group(1),
+            0.01,
+            HasUserRateOverride: false);
+
+        Assert(Math.Abs(candidate.EvidenceWeight - 1) < 0.000001,
+            "Legacy route-candidate construction did not default evidence weight to one.");
+    }
+
+    internal static void TestRoutingStatusAgeDefaultsToThirtyMinutes()
+    {
+        var expected = TimeSpan.FromMinutes(30);
+
+        Assert(new BalancedRoutingPolicy().MaximumStatusAge == expected &&
+            new PersistentAppSettings().CreatePolicy().MaximumStatusAge == expected &&
+            Criteria().MaximumStatusAge == expected &&
+            Policy(RoutingMode.Balanced).MaximumStatusAge == expected,
+            "Routing status-age defaults were not consistently thirty minutes.");
+    }
+
+    internal static void TestRoutingAcceptsStaleOrPerformanceEvidence()
+    {
+        var now = new DateTimeOffset(2026, 7, 22, 9, 0, 0, TimeSpan.Zero);
+        var result = RoutingEngine.Evaluate(
+            [
+                Provider(1, 0.01, true, 1, now.AddDays(-365), latency: null, outputTps: null),
+                Provider(2, 0.02, true, 1, checkedAt: null, latency: null, outputTps: 40),
+                Provider(3, 0.03, true, 1, checkedAt: null, latency: null, outputTps: null),
+                Provider(4, 0.04, true, 1, checkedAt: null, latency: 400, outputTps: null)
+            ],
+            [Group(1), Group(2), Group(3), Group(4)],
+            new Dictionary<long, double>(),
+            Policy(RoutingMode.Speed),
+            now);
+
+        var eligibleIds = result.EligibleCandidates.Select(candidate => candidate.Group.Id).ToArray();
+        Assert(eligibleIds.SequenceEqual(new long[] { 1, 2, 4 }),
+            "Routing did not accept stale timestamp or valid performance evidence while excluding missing evidence.");
+        Assert(result.EligibleCandidates.All(candidate => Math.Abs(candidate.EvidenceWeight - 0.25) < 0.000001),
+            "Timestamp-free performance or very old timestamp evidence did not receive floor weight.");
+    }
+
+    internal static void TestRoutingUsesLatestEvidenceTimestamp()
+    {
+        var now = new DateTimeOffset(2026, 7, 22, 9, 0, 0, TimeSpan.Zero);
+        var result = RoutingEngine.Evaluate(
+            [
+                Provider(1, 0.01, true, 0.9, now, latency: 1_000),
+                Provider(2, 0.011, true, 0.9, now.AddMinutes(-60), latency: 500,
+                    activeProbeCheckedAt: now.AddMinutes(-45))
+            ],
+            [Group(1), Group(2)],
+            new Dictionary<long, double>(),
+            Policy(RoutingMode.Speed),
+            now);
+
+        var candidate = result.EligibleCandidates.Single(item => item.Group.Id == 2);
+        Assert(Math.Abs(candidate.EvidenceWeight - (2d / 3d)) < 0.000001,
+            "Routing did not use the latest of status and active-probe evidence timestamps.");
+    }
+
+    internal static void TestStalePositiveBenefitsAreDownweighted()
+    {
+        var now = new DateTimeOffset(2026, 7, 22, 9, 0, 0, TimeSpan.Zero);
+
+        RouteEvaluation EvaluateAt(DateTimeOffset checkedAt) => RoutingEngine.Evaluate(
+            [
+                Provider(1, 0.01, true, 0.5, now, latency: 1_000),
+                Provider(2, 0.011, true, 0.9, checkedAt, latency: 500)
+            ],
+            [Group(1), Group(2)],
+            new Dictionary<long, double>(),
+            Policy(RoutingMode.Speed),
+            now);
+
+        var fresh = EvaluateAt(now);
+        var stale = EvaluateAt(now.AddMinutes(-60));
+
+        Assert(Math.Abs(fresh.CandidateScores[2] - 0.675) < 0.000001,
+            "Fresh positive speed and reliability benefits used the wrong score formula.");
+        Assert(Math.Abs(stale.CandidateScores[2] - 0.32) < 0.000001,
+            "Stale positive speed and reliability benefits were not downweighted.");
+        Assert(Math.Abs(stale.EligibleCandidates.Single(candidate => candidate.Group.Id == 2).EvidenceWeight - 0.5) < 0.000001,
+            "The stale candidate did not expose its half evidence weight.");
+    }
+
+    internal static void TestEvidenceDecayPreservesPenalties()
+    {
+        var now = new DateTimeOffset(2026, 7, 22, 9, 0, 0, TimeSpan.Zero);
+
+        RouteEvaluation EvaluatePricePenalty(DateTimeOffset checkedAt) => RoutingEngine.Evaluate(
+            [
+                Provider(1, 0.01, true, 0.5, now, latency: 1_000),
+                Provider(2, 0.011, true, 0.5, checkedAt, latency: 1_000)
+            ],
+            [Group(1), Group(2)],
+            new Dictionary<long, double>(),
+            Policy(RoutingMode.Speed),
+            now);
+
+        RouteEvaluation EvaluateNegativeBenefits(DateTimeOffset checkedAt) => RoutingEngine.Evaluate(
+            [
+                Provider(1, 0.01, true, 0.9, now, latency: 500),
+                Provider(2, 0.01, true, 0.5, checkedAt, latency: 1_000)
+            ],
+            [Group(1), Group(2)],
+            new Dictionary<long, double>(),
+            Policy(RoutingMode.Speed),
+            now);
+
+        var freshPriceScore = EvaluatePricePenalty(now).CandidateScores[2];
+        var stalePriceScore = EvaluatePricePenalty(now.AddMinutes(-60)).CandidateScores[2];
+        Assert(Math.Abs(freshPriceScore + 0.035) < 0.000001 &&
+            Math.Abs(stalePriceScore - freshPriceScore) < 0.000001,
+            "Evidence decay reduced the price-premium penalty.");
+
+        var freshNegativeScore = EvaluateNegativeBenefits(now).CandidateScores[2];
+        var staleNegativeScore = EvaluateNegativeBenefits(now.AddMinutes(-60)).CandidateScores[2];
+        Assert(Math.Abs(freshNegativeScore + 0.385) < 0.000001 &&
+            Math.Abs(staleNegativeScore - freshNegativeScore) < 0.000001,
+            "Evidence decay reduced negative speed or reliability deltas.");
+    }
+
+    internal static void TestReliabilityDeltaContributesToScore()
+    {
+        var now = new DateTimeOffset(2026, 7, 22, 9, 0, 0, TimeSpan.Zero);
+
+        RouteEvaluation Evaluate(double candidateSuccess, DateTimeOffset checkedAt, bool includeSuccess = true) =>
+            RoutingEngine.Evaluate(
+                [
+                    Provider(1, 0.01, true, 0.5, now, latency: 1_000),
+                    Provider(2, 0.011, true, candidateSuccess, checkedAt, latency: 1_000,
+                        includeSuccess: includeSuccess)
+                ],
+                [Group(1), Group(2)],
+                new Dictionary<long, double>(),
+                Policy(RoutingMode.Speed),
+                now);
+
+        var freshControl = Evaluate(0.5, now).CandidateScores[2];
+        var freshReliable = Evaluate(0.9, now).CandidateScores[2];
+        Assert(Math.Abs((freshReliable - freshControl) - 0.15 * 0.4) < 0.000001,
+            "Fresh reliability delta did not contribute exactly 0.15 times the delta.");
+
+        var staleControl = Evaluate(0.5, now.AddMinutes(-60)).CandidateScores[2];
+        var staleReliable = Evaluate(0.9, now.AddMinutes(-60)).CandidateScores[2];
+        Assert(Math.Abs((staleReliable - staleControl) - 0.15 * 0.4 * 0.5) < 0.000001,
+            "A positive stale reliability delta was not weighted by evidence age.");
+
+        var missingSuccess = Evaluate(0, now, includeSuccess: false).CandidateScores[2];
+        var explicitZero = Evaluate(0, now).CandidateScores[2];
+        Assert(Math.Abs(missingSuccess - explicitZero) < 0.000001,
+            "Missing six-hour success evidence was not scored as zero.");
+    }
+
+    internal static void TestReliabilityWeightConstant()
+    {
+        Assert(Math.Abs(RoutingEngine.ReliabilityWeight - 0.15) < 0.000001,
+            "Routing reliability weight changed from 0.15.");
+    }
+
+    internal static void TestReliabilityScoreNormalizesRawRates()
+    {
+        var now = new DateTimeOffset(2026, 7, 22, 9, 0, 0, TimeSpan.Zero);
+
+        RouteEvaluation Evaluate(double baselineSuccess, double candidateSuccess) => RoutingEngine.Evaluate(
+            [
+                Provider(1, 0.01, true, baselineSuccess, now, latency: 1_000),
+                Provider(2, 0.011, true, candidateSuccess, now, latency: 1_000)
+            ],
+            [Group(1), Group(2)],
+            new Dictionary<long, double>(),
+            Policy(RoutingMode.Speed),
+            now);
+
+        Assert(Math.Abs(Evaluate(0, 2).CandidateScores[2] - 0.115) < 0.000001,
+            "A finite out-of-range candidate success rate was not clamped to one.");
+        Assert(Math.Abs(Evaluate(0, double.PositiveInfinity).CandidateScores[2] + 0.035) < 0.000001,
+            "A non-finite candidate success rate contributed to ranking.");
+        Assert(Math.Abs(Evaluate(2, 1).CandidateScores[2] + 0.035) < 0.000001,
+            "An out-of-range baseline success rate was not normalized before comparison.");
+    }
+
     internal static void TestSelectivePolicyPreservesLocalWeights()
     {
         Assert(Policy(RoutingMode.Economy).PriceWeight == 0.95, "Economy weight changed.");
@@ -78,7 +282,7 @@ internal static partial class CoreTestCases
         var result = RoutingEngine.Evaluate(
             [
                 Provider(1, 0.01, true, 0.99, stale, latency: 1_500),
-                Provider(2, 0.02, true, 0.99, stale, latency: null)
+                Provider(2, 0.02, true, 0.99, checkedAt: null, latency: null, outputTps: null)
             ],
             [Group(1), Group(2)],
             new Dictionary<long, double>(),
@@ -96,7 +300,7 @@ internal static partial class CoreTestCases
                 effectiveMultiplier: 0.01,
                 minimumSuccessRate6h: 0,
                 now,
-                TimeSpan.FromMinutes(15)),
+                RoutingEngine.DefaultMaximumStatusAge),
             "The grid presentation disagreed with routing eligibility for first-token evidence.");
     }
 

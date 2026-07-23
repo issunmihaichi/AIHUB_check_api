@@ -171,7 +171,7 @@ internal sealed partial class MainForm
             ranking => ranking.ProviderId,
             StringComparer.Ordinal);
         var minimumSuccessRate6h = (double)_minimumSuccessInput.Value / 100;
-        var maximumStatusAge = TimeSpan.FromMinutes(15);
+        var maximumStatusAge = RoutingEngine.DefaultMaximumStatusAge;
         var rows = result.Providers
             .Where(provider => provider.Platform.Equals(_platformCombo.SelectedItem?.ToString() ?? "openai", StringComparison.OrdinalIgnoreCase))
             .Select(provider =>
@@ -413,7 +413,7 @@ internal sealed partial class MainForm
         var criteria = new RoutingCriteria(
             platform,
             (double)_minimumSuccessInput.Value / 100,
-            TimeSpan.FromMinutes(15),
+            RoutingEngine.DefaultMaximumStatusAge,
             _providerBlocklist);
 
         var now = DateTimeOffset.UtcNow;

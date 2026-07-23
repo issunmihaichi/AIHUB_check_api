@@ -165,7 +165,10 @@ public sealed record RouteCandidate(
     ProviderStatus Provider,
     GroupInfo Group,
     double EffectiveMultiplier,
-    bool HasUserRateOverride);
+    bool HasUserRateOverride)
+{
+    public double EvidenceWeight { get; init; } = 1;
+}
 
 public enum RoutingMode
 {
@@ -205,7 +208,7 @@ public sealed record BalancedRoutingPolicy
     public string Platform { get; init; } = "openai";
     public RoutingMode Mode { get; init; } = RoutingMode.Economy;
     public double MinimumSuccessRate6h { get; init; } = 0;
-    public TimeSpan MaximumStatusAge { get; init; } = TimeSpan.FromMinutes(15);
+    public TimeSpan MaximumStatusAge { get; init; } = RoutingEngine.DefaultMaximumStatusAge;
     public ProviderBlocklist Blocklist { get; init; } = ProviderBlocklist.Empty;
 
     public double PriceWeight => Mode switch

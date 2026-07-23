@@ -43,7 +43,7 @@ public sealed class PersistentAppSettings
             Platform = string.IsNullOrWhiteSpace(Platform) ? "openai" : Platform,
             Mode = RoutingMode,
             MinimumSuccessRate6h = Math.Clamp(MinimumSuccessPercent, 0, 100) / 100d,
-            MaximumStatusAge = TimeSpan.FromMinutes(15),
+            MaximumStatusAge = RoutingEngine.DefaultMaximumStatusAge,
             Blocklist = new ProviderBlocklist(BlockedGroupIds, BlockedNodePatterns)
         };
     }

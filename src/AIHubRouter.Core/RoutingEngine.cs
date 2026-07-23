@@ -2,6 +2,9 @@ namespace AIHubRouter.Core;
 
 public static class RoutingEngine
 {
+    public static readonly TimeSpan DefaultMaximumStatusAge = TimeSpan.FromMinutes(30);
+    public const double ReliabilityWeight = 0.15;
+
     public static RouteCandidate? SelectCheapest(
         IEnumerable<ProviderStatus> providers,
         IEnumerable<GroupInfo> availableGroups,
@@ -26,14 +29,20 @@ public static class RoutingEngine
             .Where(provider => !blocklist.IsBlocked(provider, groups[provider.GroupId!.Value]))
             .Where(provider => provider.Platform.Equals(criteria.Platform, StringComparison.OrdinalIgnoreCase))
             .Where(provider => provider.PriceMultiplier >= 0 && double.IsFinite(provider.PriceMultiplier))
-            .Where(provider => HasFreshRoutingEvidence(provider, now, criteria.MaximumStatusAge))
+            .Where(HasUsableRoutingEvidence)
             .Where(provider => (provider.SuccessRate6h ?? 0) >= criteria.MinimumSuccessRate6h)
             .Select(provider =>
             {
                 var group = groups[provider.GroupId!.Value];
                 var hasOverride = userGroupRates.TryGetValue(group.Id, out var overrideRate);
                 var effectiveRate = hasOverride ? overrideRate : provider.PriceMultiplier;
-                return new RouteCandidate(provider, group, effectiveRate, hasOverride);
+                return new RouteCandidate(provider, group, effectiveRate, hasOverride)
+                {
+                    EvidenceWeight = CalculateEvidenceWeight(
+                        GetLatestEvidenceTimestamp(provider),
+                        now,
+                        criteria.MaximumStatusAge)
+                };
             })
             .Where(candidate => candidate.EffectiveMultiplier >= 0 && double.IsFinite(candidate.EffectiveMultiplier))
             .GroupBy(candidate => candidate.Group.Id)
@@ -75,14 +84,20 @@ public static class RoutingEngine
             .Where(provider => !blocklist.IsBlocked(provider, groups[provider.GroupId!.Value]))
             .Where(provider => provider.Platform.Equals(policy.Platform, StringComparison.OrdinalIgnoreCase))
             .Where(provider => provider.PriceMultiplier >= 0 && double.IsFinite(provider.PriceMultiplier))
-            .Where(provider => HasFreshRoutingEvidence(provider, now, policy.MaximumStatusAge))
+            .Where(HasUsableRoutingEvidence)
             .Where(provider => (provider.SuccessRate6h ?? 0) >= policy.MinimumSuccessRate6h)
             .Select(provider =>
             {
                 var group = groups[provider.GroupId!.Value];
                 var hasOverride = userGroupRates.TryGetValue(group.Id, out var overrideRate);
                 var effectiveRate = hasOverride ? overrideRate : provider.PriceMultiplier;
-                return new RouteCandidate(provider, group, effectiveRate, hasOverride);
+                return new RouteCandidate(provider, group, effectiveRate, hasOverride)
+                {
+                    EvidenceWeight = CalculateEvidenceWeight(
+                        GetLatestEvidenceTimestamp(provider),
+                        now,
+                        policy.MaximumStatusAge)
+                };
             })
             .Where(candidate => candidate.EffectiveMultiplier >= 0 && double.IsFinite(candidate.EffectiveMultiplier))
             .GroupBy(candidate => candidate.Group.Id)
@@ -128,11 +143,13 @@ public static class RoutingEngine
         }
 
         var baselineLatency = baseline.Provider.FirstTokenLatencyMs!.Value;
+        var baselineSuccessRate = NormalizeSuccessRate(baseline.Provider.SuccessRate6h);
         foreach (var candidate in decisionPool)
         {
             var score = CalculateTradeoffScore(
                 minimumMultiplier,
                 baselineLatency,
+                baselineSuccessRate,
                 candidate,
                 policy.PriceWeight,
                 policy.LatencyWeight);
@@ -159,18 +176,60 @@ public static class RoutingEngine
             : double.MaxValue;
     }
 
-    private static bool IsKnownLatency(double? latency) =>
-        latency is > 0 && double.IsFinite(latency.Value);
-
-    internal static bool HasFreshRoutingEvidence(
-        ProviderStatus provider,
+    public static double CalculateEvidenceWeight(
+        DateTimeOffset? observedAt,
         DateTimeOffset now,
         TimeSpan maximumAge)
     {
-        ArgumentNullException.ThrowIfNull(provider);
-        return IsKnownLatency(provider.FirstTokenLatencyMs) ||
-            IsFresh(provider.CheckedAt, now, maximumAge);
+        if (maximumAge <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumAge));
+        }
+
+        if (observedAt is null)
+        {
+            return 0.25;
+        }
+
+        var age = now - observedAt.Value;
+        if (age <= maximumAge)
+        {
+            return 1;
+        }
+
+        return Math.Max(0.25, maximumAge.TotalSeconds / age.TotalSeconds);
     }
+
+    private static bool IsKnownLatency(double? latency) =>
+        latency is > 0 && double.IsFinite(latency.Value);
+
+    internal static bool HasUsableRoutingEvidence(ProviderStatus provider)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        return GetLatestEvidenceTimestamp(provider) is not null ||
+            IsKnownLatency(provider.FirstTokenLatencyMs) ||
+            IsKnownOutputSpeed(provider.OutputTokensPerSecond);
+    }
+
+    internal static DateTimeOffset? GetLatestEvidenceTimestamp(ProviderStatus provider)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        return (provider.CheckedAt, provider.ActiveProbeCheckedAt) switch
+        {
+            ({ } checkedAt, { } probeCheckedAt) => checkedAt >= probeCheckedAt ? checkedAt : probeCheckedAt,
+            ({ } checkedAt, null) => checkedAt,
+            (null, { } probeCheckedAt) => probeCheckedAt,
+            _ => null
+        };
+    }
+
+    private static bool IsKnownOutputSpeed(double? outputTokensPerSecond) =>
+        outputTokensPerSecond is > 0 && double.IsFinite(outputTokensPerSecond.Value);
+
+    private static double NormalizeSuccessRate(double? successRate) =>
+        successRate is { } value && double.IsFinite(value)
+            ? Math.Clamp(value, 0, 1)
+            : 0;
 
     private static bool NearlyEqual(double left, double right) =>
         Math.Abs(left - right) <= 1e-12;
@@ -178,29 +237,28 @@ public static class RoutingEngine
     private static double CalculateTradeoffScore(
         double minimumMultiplier,
         double baselineLatency,
+        double baselineSuccessRate,
         RouteCandidate candidate,
         double priceWeight,
         double latencyWeight)
     {
         var pricePremiumRatio = (candidate.EffectiveMultiplier - minimumMultiplier) / minimumMultiplier;
         var speedupRatio = baselineLatency / candidate.Provider.FirstTokenLatencyMs!.Value - 1;
-        var score = latencyWeight * speedupRatio - priceWeight * pricePremiumRatio;
+        var weightedSpeedup = speedupRatio > 0
+            ? speedupRatio * candidate.EvidenceWeight
+            : speedupRatio;
+        var reliabilityDelta = NormalizeSuccessRate(candidate.Provider.SuccessRate6h) - baselineSuccessRate;
+        var weightedReliabilityDelta = reliabilityDelta > 0
+            ? reliabilityDelta * candidate.EvidenceWeight
+            : reliabilityDelta;
+        var score = latencyWeight * weightedSpeedup -
+            priceWeight * pricePremiumRatio +
+            ReliabilityWeight * weightedReliabilityDelta;
         if (double.IsFinite(score))
         {
             return score;
         }
 
         return score > 0 ? double.MaxValue : double.MinValue;
-    }
-
-    private static bool IsFresh(DateTimeOffset? checkedAt, DateTimeOffset now, TimeSpan maximumAge)
-    {
-        if (checkedAt is null)
-        {
-            return false;
-        }
-
-        var age = now - checkedAt.Value;
-        return age >= TimeSpan.FromMinutes(-1) && age <= maximumAge;
     }
 }

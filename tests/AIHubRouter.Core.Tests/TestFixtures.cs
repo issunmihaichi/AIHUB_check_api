@@ -20,14 +20,16 @@ internal static class TestFixtures
         double rate,
         bool available,
         double success,
-        DateTimeOffset checkedAt,
+        DateTimeOffset? checkedAt,
         double? latency = 1000,
         bool warning = false,
         double? outputTps = 20,
         DateTimeOffset? lastCallEndedAt = null,
         bool enabled = true,
         DateTimeOffset? lastCallAt = null,
-        string? id = null)
+        string? id = null,
+        DateTimeOffset? activeProbeCheckedAt = null,
+        bool includeSuccess = true)
     {
         return new ProviderStatus
         {
@@ -39,11 +41,14 @@ internal static class TestFixtures
             Available = available,
             Enabled = enabled,
             CheckedAt = checkedAt,
+            ActiveProbeCheckedAt = activeProbeCheckedAt,
             LastCallEndedAt = lastCallEndedAt,
             LastCallAt = lastCallAt,
             FirstTokenLatencyMs = latency,
             OutputTokensPerSecond = outputTps,
-            SuccessRates = new Dictionary<string, double> { ["6h"] = success },
+            SuccessRates = includeSuccess
+                ? new Dictionary<string, double> { ["6h"] = success }
+                : new Dictionary<string, double>(),
             WarningReasons = warning
                 ? [new ProviderWarningReason { Type = "synthetic_warning", Message = "synthetic warning" }]
                 : []
@@ -62,14 +67,14 @@ internal static class TestFixtures
         };
     }
 
-    internal static RoutingCriteria Criteria() => new("openai", 0, TimeSpan.FromMinutes(15));
+    internal static RoutingCriteria Criteria() => new("openai", 0, RoutingEngine.DefaultMaximumStatusAge);
 
     internal static BalancedRoutingPolicy Policy(RoutingMode mode) => new()
     {
         Platform = "openai",
         Mode = mode,
         MinimumSuccessRate6h = 0,
-        MaximumStatusAge = TimeSpan.FromMinutes(15)
+        MaximumStatusAge = RoutingEngine.DefaultMaximumStatusAge
     };
 
     internal static void Assert(bool condition, string message)

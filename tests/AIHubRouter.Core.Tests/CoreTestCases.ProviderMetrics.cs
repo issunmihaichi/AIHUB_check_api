@@ -8,6 +8,12 @@ namespace AIHubRouter.Core.Tests;
 
 internal static partial class CoreTestCases
 {
+    internal static void TestRollingProviderMetricsDefaultToThirtyMinutes()
+    {
+        Assert(ProviderMetricsRollingWindow.DefaultWindow == TimeSpan.FromMinutes(30),
+            "Provider metrics did not default to a thirty-minute rolling window.");
+    }
+
     internal static void TestRollingProviderMetricsUseMedians()
     {
         var now = new DateTimeOffset(2026, 7, 22, 9, 0, 0, TimeSpan.Zero);
@@ -35,9 +41,9 @@ internal static partial class CoreTestCases
         var provider = snapshot.Providers.Single();
         Assert(provider.GroupId == 1, "Rolling metrics changed the provider group identity.");
         Assert(Math.Abs(provider.PriceMultiplier - 0.03) < 0.000001, "Public multiplier was not the median.");
-        Assert(provider.Available, "Availability did not use the boolean median.");
-        Assert(provider.Enabled, "Enabled state did not use the boolean median.");
-        Assert(provider.CheckedAt == now.AddMinutes(-10), "CheckedAt was not the timestamp median.");
+        Assert(provider.Available, "Availability did not use the latest observation.");
+        Assert(provider.Enabled, "Enabled state did not use the latest observation.");
+        Assert(provider.CheckedAt == now, "CheckedAt did not use the latest observation.");
         Assert(provider.LastCallEndedAt == now.AddMinutes(-11), "LastCallEndedAt was not the timestamp median.");
         Assert(provider.LastCallAt == now.AddMinutes(-12), "LastCallAt was not the timestamp median.");
         Assert(Math.Abs((provider.FirstTokenLatencyMs ?? 0) - 300) < 0.000001, "TTFT was not the median.");
@@ -53,19 +59,82 @@ internal static partial class CoreTestCases
         var window = new ProviderMetricsRollingWindow();
 
         window.Observe(
-            now.AddMinutes(-21),
-            [Provider(1, 0.01, available: true, success: 1, checkedAt: now.AddMinutes(-21), latency: 100, outputTps: 10)],
+            now.AddMinutes(-30).AddTicks(-1),
+            [Provider(1, 0.99, available: true, success: 0.1,
+                checkedAt: now.AddMinutes(-30).AddTicks(-1), latency: 900, outputTps: 90,
+                lastCallEndedAt: now.AddMinutes(-30).AddTicks(-1),
+                lastCallAt: now.AddMinutes(-30).AddTicks(-1))],
+            new Dictionary<long, double> { [1] = 0.99 });
+        window.Observe(
+            now.AddMinutes(-30),
+            [Provider(1, 0.01, available: true, success: 0.6,
+                checkedAt: now.AddMinutes(-30), latency: 100, outputTps: 10,
+                lastCallEndedAt: now.AddMinutes(-29), lastCallAt: now.AddMinutes(-30))],
             new Dictionary<long, double> { [1] = 0.02 });
         var snapshot = window.Observe(
             now,
-            [Provider(1, 0.03, available: false, success: 0.5, checkedAt: now, latency: 300, outputTps: 30)],
+            [Provider(1, 0.03, available: false, success: 1, checkedAt: now,
+                latency: 300, outputTps: 30,
+                lastCallEndedAt: now.AddMinutes(-1), lastCallAt: now)],
             new Dictionary<long, double> { [1] = 0.04 });
 
         var provider = snapshot.Providers.Single();
-        Assert(Math.Abs(provider.PriceMultiplier - 0.03) < 0.000001, "An expired public multiplier affected the median.");
-        Assert(!provider.Available, "An expired availability sample affected the median.");
-        Assert(snapshot.UserGroupRates.TryGetValue(1, out var userRate) && Math.Abs(userRate - 0.04) < 0.000001,
-            "An expired user-rate sample affected the median.");
+        Assert(Math.Abs(provider.PriceMultiplier - 0.02) < 0.000001,
+            "The exact cutoff sample was not retained or the older sample affected the public multiplier median.");
+        Assert(Math.Abs((provider.FirstTokenLatencyMs ?? 0) - 200) < 0.000001,
+            "The thirty-minute TTFT median did not retain the exact cutoff sample.");
+        Assert(Math.Abs((provider.OutputTokensPerSecond ?? 0) - 20) < 0.000001,
+            "The thirty-minute output-speed median did not retain the exact cutoff sample.");
+        Assert(provider.LastCallEndedAt == now.AddMinutes(-15),
+            "The thirty-minute last-call-ended timestamp was not the retained-sample median.");
+        Assert(provider.LastCallAt == now.AddMinutes(-15),
+            "The thirty-minute last-call timestamp was not the retained-sample median.");
+        Assert(Math.Abs((provider.SuccessRate6h ?? 0) - 0.8) < 0.000001,
+            "The thirty-minute success-rate median did not retain the exact cutoff sample.");
+        Assert(snapshot.UserGroupRates.TryGetValue(1, out var userRate) && Math.Abs(userRate - 0.03) < 0.000001,
+            "The exact cutoff user rate was not retained or an older rate affected its median.");
+    }
+
+    internal static void TestRollingProviderMetricsUseLatestCurrentState()
+    {
+        var now = new DateTimeOffset(2026, 7, 22, 9, 0, 0, TimeSpan.Zero);
+        var window = new ProviderMetricsRollingWindow();
+
+        window.Observe(
+            now.AddMinutes(-20),
+            [Provider(1, 0.01, available: true, success: 0.6,
+                checkedAt: now.AddMinutes(-20), latency: 100, outputTps: 10, enabled: true)],
+            new Dictionary<long, double>());
+        var unavailable = window.Observe(
+            now.AddMinutes(-10),
+            [Provider(1, 0.03, available: false, success: 0.8,
+                checkedAt: now.AddMinutes(-10), latency: 300, outputTps: 30, enabled: false)],
+            new Dictionary<long, double>());
+
+        var unavailableProvider = unavailable.Providers.Single();
+        Assert(!unavailableProvider.Available && !unavailableProvider.Enabled,
+            "Historical true states overrode the latest unavailable or disabled state.");
+        Assert(unavailableProvider.CheckedAt == now.AddMinutes(-10),
+            "Historical timestamps overrode the latest CheckedAt value.");
+        Assert(Math.Abs(unavailableProvider.PriceMultiplier - 0.02) < 0.000001,
+            "Using latest state changed numeric median aggregation.");
+
+        var restored = window.Observe(
+            now,
+            [Provider(1, 0.05, available: true, success: 1,
+                checkedAt: now, latency: 500, outputTps: 50, enabled: true)],
+            new Dictionary<long, double>());
+
+        var restoredProvider = restored.Providers.Single();
+        Assert(restoredProvider.Available && restoredProvider.Enabled,
+            "A later healthy observation did not restore availability and enabled state.");
+        Assert(restoredProvider.CheckedAt == now,
+            "A later healthy observation did not restore the latest CheckedAt value.");
+        Assert(Math.Abs(restoredProvider.PriceMultiplier - 0.03) < 0.000001 &&
+            Math.Abs((restoredProvider.FirstTokenLatencyMs ?? 0) - 300) < 0.000001 &&
+            Math.Abs((restoredProvider.OutputTokensPerSecond ?? 0) - 30) < 0.000001 &&
+            Math.Abs((restoredProvider.SuccessRate6h ?? 0) - 0.8) < 0.000001,
+            "Restoring latest state changed numeric median aggregation.");
     }
 
     internal static void TestRollingProviderMetricsClearHistory()
@@ -107,6 +176,42 @@ internal static partial class CoreTestCases
             "Duplicate-group public multiplier was not aggregated by median.");
         Assert(Math.Abs((provider.FirstTokenLatencyMs ?? 0) - 200) < 0.000001,
             "Duplicate-group TTFT was not aggregated by median.");
+    }
+
+    internal static void TestRollingProviderMetricsUseLatestDuplicateState()
+    {
+        var now = new DateTimeOffset(2026, 7, 22, 9, 0, 0, TimeSpan.Zero);
+        var window = new ProviderMetricsRollingWindow();
+
+        var unavailable = window.Observe(
+            now,
+            [
+                Provider(1, 0.01, available: true, success: 1,
+                    checkedAt: now.AddMinutes(-1), enabled: true, id: "provider-a"),
+                Provider(1, 0.03, available: false, success: 1,
+                    checkedAt: now, enabled: false, id: "provider-z")
+            ],
+            new Dictionary<long, double>());
+
+        var unavailableProvider = unavailable.Providers.Single();
+        Assert(!unavailableProvider.Available && !unavailableProvider.Enabled &&
+            unavailableProvider.CheckedAt == now,
+            "An older duplicate row masked the newest unavailable or disabled state.");
+
+        var restored = window.Observe(
+            now.AddMinutes(1),
+            [
+                Provider(1, 0.05, available: false, success: 1,
+                    checkedAt: now, enabled: false, id: "provider-a"),
+                Provider(1, 0.07, available: true, success: 1,
+                    checkedAt: now.AddMinutes(1), enabled: true, id: "provider-z")
+            ],
+            new Dictionary<long, double>());
+
+        var restoredProvider = restored.Providers.Single();
+        Assert(restoredProvider.Available && restoredProvider.Enabled &&
+            restoredProvider.CheckedAt == now.AddMinutes(1),
+            "The newest healthy duplicate row did not restore current state.");
     }
 
     internal static void TestRollingProviderMetricsExposeConservativePerformance()

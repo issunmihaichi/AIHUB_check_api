@@ -16,11 +16,11 @@ public static class ProviderStatusPresentation
             double.IsFinite(provider.PriceMultiplier) &&
             effectiveMultiplier >= 0 &&
             double.IsFinite(effectiveMultiplier);
-        var isFresh = RoutingEngine.HasFreshRoutingEvidence(provider, now, maximumStatusAge);
+        var hasEvidence = RoutingEngine.HasUsableRoutingEvidence(provider);
         return provider.Enabled &&
             provider.Available &&
             isRateValid &&
-            isFresh &&
+            hasEvidence &&
             (provider.SuccessRate6h ?? 0) >= minimumSuccessRate6h &&
             (!hasAccountData || isAuthorized);
     }
@@ -39,14 +39,21 @@ public static class ProviderStatusPresentation
             double.IsFinite(provider.PriceMultiplier) &&
             effectiveMultiplier >= 0 &&
             double.IsFinite(effectiveMultiplier);
-        var isFresh = RoutingEngine.HasFreshRoutingEvidence(provider, now, maximumStatusAge);
+        var hasEvidence = RoutingEngine.HasUsableRoutingEvidence(provider);
+        var evidenceWeight = hasEvidence
+            ? RoutingEngine.CalculateEvidenceWeight(
+                RoutingEngine.GetLatestEvidenceTimestamp(provider),
+                now,
+                maximumStatusAge)
+            : 0;
         var state = !provider.Enabled ? "已停用"
             : !provider.Available ? "当前异常"
             : !isRateValid ? "倍率无效"
-            : !isFresh ? "数据过期"
+            : !hasEvidence ? "数据过期"
             : (provider.SuccessRate6h ?? 0) < minimumSuccessRate6h ? "低于阈值"
             : hasAccountData && !isAuthorized ? "账号不可用"
             : !hasAccountData ? "待认证"
+            : evidenceWeight < 1 ? "数据陈旧（已降权）"
             : "可路由";
         return DecorateRoutableState(state, provider);
     }

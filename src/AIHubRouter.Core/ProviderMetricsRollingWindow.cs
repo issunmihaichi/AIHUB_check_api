@@ -6,7 +6,7 @@ public sealed record ProviderMetricsSnapshot(
 
 public sealed class ProviderMetricsRollingWindow
 {
-    public static readonly TimeSpan DefaultWindow = TimeSpan.FromMinutes(20);
+    public static readonly TimeSpan DefaultWindow = RoutingEngine.DefaultMaximumStatusAge;
 
     private readonly TimeSpan _window;
     private readonly Dictionary<ProviderKey, List<ProviderSample>> _providerSamples = [];
@@ -178,9 +178,9 @@ public sealed class ProviderMetricsRollingWindow
             PriceMultiplier = Median(samples
                     .Select(sample => sample.Provider.PriceMultiplier)
                     .Where(IsNonNegativeFinite)) ?? latest.PriceMultiplier,
-            Available = BooleanMedian(samples.Select(sample => sample.Provider.Available)),
-            Enabled = BooleanMedian(samples.Select(sample => sample.Provider.Enabled)),
-            CheckedAt = MedianTimestamp(samples.Select(sample => sample.Provider.CheckedAt)),
+            Available = latest.Available,
+            Enabled = latest.Enabled,
+            CheckedAt = latest.CheckedAt,
             LastCallEndedAt = MedianTimestamp(samples.Select(sample => sample.Provider.LastCallEndedAt)),
             LastCallAt = MedianTimestamp(samples.Select(sample => sample.Provider.LastCallAt)),
             FirstTokenLatencyMs = activeProbeLatency ?? Median(samples
@@ -242,12 +242,10 @@ public sealed class ProviderMetricsRollingWindow
 
     private static ProviderStatus SelectRepresentative(IEnumerable<ProviderStatus> providers) =>
         providers
-            .OrderBy(provider => provider.Id, StringComparer.Ordinal)
+            .OrderByDescending(provider => provider.CheckedAt ?? DateTimeOffset.MinValue)
+            .ThenBy(provider => provider.Id, StringComparer.Ordinal)
             .ThenBy(provider => provider.PlanType, StringComparer.Ordinal)
             .First();
-
-    private static bool BooleanMedian(IEnumerable<bool> values) =>
-        (Median(values.Select(value => value ? 1d : 0d)) ?? 0) >= 0.5;
 
     private static double? Median(IEnumerable<double> values)
     {
