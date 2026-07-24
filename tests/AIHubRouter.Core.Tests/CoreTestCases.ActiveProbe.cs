@@ -694,6 +694,72 @@ internal static partial class CoreTestCases
             "A caller cancellation was converted to a selected-Key node result.");
     }
 
+    internal static void TestActiveProbeSelectedKeyCancellationWinsRecoverableFailure()
+    {
+        var now = new DateTimeOffset(2026, 7, 24, 11, 30, 0, TimeSpan.Zero);
+        using var cancellation = new CancellationTokenSource();
+        var upstream = new StubUpstreamProbeClient(_ =>
+        {
+            cancellation.Cancel();
+            return Task.FromException<ActiveProbeMeasurement>(
+                new HttpRequestException("synthetic post-cancellation transport failure"));
+        });
+
+        var failure = CaptureException(() => new ActiveProviderProbeService(upstream, () => now)
+            .CheckSelectedKeyAsync(
+                new StubRoutingClient(now),
+                new ActiveProbeConfiguration(
+                    "https://example.test", "probe-key-value", "probe-model", 10, "openai"),
+                cancellation.Token)
+            .GetAwaiter()
+            .GetResult());
+
+        Assert(failure is OperationCanceledException,
+            "A selected-Key caller cancellation lost to a recoverable transport failure.");
+    }
+
+    internal static void TestActiveProbeCycleCancellationWinsRecoverableFailureAndRestoresKey()
+    {
+        var now = new DateTimeOffset(2026, 7, 24, 11, 30, 0, TimeSpan.Zero);
+        using var cancellation = new CancellationTokenSource();
+        var account = new StubRoutingClient(now)
+        {
+            ProvidersOverride = [Provider(2, 0.01, true, 1, now)],
+            GroupsOverride = [Group(1), Group(2)],
+            AfterRemoteKeyGroupUpdate = (_, groupId, token) =>
+            {
+                if (groupId == 1)
+                {
+                    Assert(!token.CanBeCanceled,
+                        "A canceled probe cycle restored its test Key with the caller token.");
+                }
+            }
+        };
+        var upstream = new StubUpstreamProbeClient(_ =>
+        {
+            cancellation.Cancel();
+            return Task.FromException<ActiveProbeMeasurement>(
+                new IOException("synthetic post-cancellation stream failure"));
+        });
+
+        var failure = CaptureException(() => new ActiveProviderProbeService(upstream, () => now)
+            .RunCycleAsync(
+                account,
+                new ActiveProbeConfiguration(
+                    "https://example.test", "probe-key-value", "probe-model", 10, "openai"),
+                account.ProvidersOverride,
+                account.GroupsOverride,
+                ProviderBlocklist.Empty,
+                cancellation.Token)
+            .GetAwaiter()
+            .GetResult());
+
+        Assert(failure is OperationCanceledException,
+            "A cycle caller cancellation lost to a recoverable stream failure.");
+        Assert(account.UpdatedGroupIds.SequenceEqual(new long[] { 2, 1 }),
+            "A canceled cycle did not restore the test Key after a recoverable failure race.");
+    }
+
     internal static void TestActiveProbeServicePropagatesLocalConfigurationFailures()
     {
         var now = new DateTimeOffset(2026, 7, 24, 11, 0, 0, TimeSpan.Zero);

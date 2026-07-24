@@ -38,6 +38,8 @@ internal static class TestCatalog
         new TestCase("Active probe service returns sanitized recoverable details", CoreTestCases.TestActiveProbeServiceReturnsSanitizedRecoverableDetails),
         new TestCase("Active probe service propagates global failures", CoreTestCases.TestActiveProbeServicePropagatesGlobalFailures),
         new TestCase("Active probe service propagates account failures and cancellation", CoreTestCases.TestActiveProbeServicePropagatesAccountFailuresAndCancellation),
+        new TestCase("Active probe selected-Key cancellation wins recoverable failure", CoreTestCases.TestActiveProbeSelectedKeyCancellationWinsRecoverableFailure),
+        new TestCase("Active probe cycle cancellation wins recoverable failure and restores Key", CoreTestCases.TestActiveProbeCycleCancellationWinsRecoverableFailureAndRestoresKey),
         new TestCase("Active probe service propagates local configuration failures", CoreTestCases.TestActiveProbeServicePropagatesLocalConfigurationFailures),
         new TestCase("Active probe Key persists only in credentials", CoreTestCases.TestActiveProbeKeyPersistsOnlyInCredentials),
         new TestCase("Session persistence retains active probe Key", CoreTestCases.TestSessionPersistenceRetainsActiveProbeKey),

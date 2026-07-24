@@ -464,8 +464,14 @@ public sealed class ActiveProviderProbeService
                 measurement with { ObservedAt = _utcNow() },
                 "ok");
         }
-        catch (Exception exception) when (TryGetRecoverableProbeDetail(exception, cancellationToken, out var detail))
+        catch (Exception exception)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!TryGetRecoverableProbeDetail(exception, cancellationToken, out var detail))
+            {
+                throw;
+            }
+
             return new ActiveProbeResult(groupId, false, null, detail);
         }
     }
@@ -528,8 +534,14 @@ public sealed class ActiveProviderProbeService
                     measurement.Validate();
                     results.Add(new ActiveProbeResult(group.Id, true, measurement with { ObservedAt = _utcNow() }, "ok"));
                 }
-                catch (Exception exception) when (TryGetRecoverableProbeDetail(exception, cancellationToken, out var detail))
+                catch (Exception exception)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (!TryGetRecoverableProbeDetail(exception, cancellationToken, out var detail))
+                    {
+                        throw;
+                    }
+
                     results.Add(new ActiveProbeResult(group.Id, false, null, detail));
                 }
             }
