@@ -406,8 +406,8 @@ internal static partial class CoreTestCases
                 "application/json")
         });
 
-        Assert(exception.ApiCode is null,
-            "A credential-shaped API code was retained from an HTTP 200 JSON error.");
+        Assert(exception.ApiCode == "invalid_api_key",
+            "The known categorical API code was not retained from an HTTP 200 JSON error.");
         Assert(!exception.Message.Contains(sensitiveDetail, StringComparison.Ordinal),
             "The structured probe exception leaked an upstream error message.");
     }
@@ -474,7 +474,6 @@ internal static partial class CoreTestCases
                      "sk-synthetic-placeholder",
                      "bearer-synthetic-placeholder",
                      "eyJheader.eyJpayload.synthetic-signature",
-                     "invalid_api_key",
                      "synthetic_token_failure",
                      "synthetic_secret_failure",
                      "password_rejected",
@@ -485,6 +484,9 @@ internal static partial class CoreTestCases
             Assert(exception.ApiCode is null,
                 "A credential-shaped API code was exposed by the probe protocol exception.");
         }
+
+        Assert(new ActiveProbeProtocolException("invalid_api_key").ApiCode == "invalid_api_key",
+            "A known categorical global API code was treated as credential-shaped data.");
     }
 
     internal static void TestActiveProbeNonSuccessHttpResponsePreservesStatusAndRedactsBody()
@@ -506,6 +508,46 @@ internal static partial class CoreTestCases
             "A non-success probe response did not preserve its HTTP status code.");
         Assert(!exception.Message.Contains(sensitiveBody, StringComparison.Ordinal),
             "A non-success probe response leaked its body through the exception message.");
+    }
+
+    internal static void TestActiveProbeNonSuccessJsonGlobalFailurePreservesStatus()
+    {
+        var now = new DateTimeOffset(2026, 7, 24, 11, 0, 0, TimeSpan.Zero);
+        var configuration = new ActiveProbeConfiguration(
+            "https://example.test", "probe-key-value", "probe-model", 10, "openai");
+
+        foreach (var (statusCode, apiCode) in new[]
+                 {
+                     (HttpStatusCode.BadRequest, "model_not_found"),
+                     (HttpStatusCode.NotFound, "invalid_api_key")
+                 })
+        {
+            using var probe = new OpenAiStreamingProbeClient(
+                new StubHttpMessageHandler(_ => new HttpResponseMessage(statusCode)
+                {
+                    Content = new StringContent(
+                        $"{{\"error\":{{\"code\":\"{apiCode}\",\"message\":\"sensitive-upstream-detail\"}}}}",
+                        Encoding.UTF8,
+                        "application/json")
+                }));
+            var failure = CaptureException(() => new ActiveProviderProbeService(probe, () => now)
+                .CheckSelectedKeyAsync(new StubRoutingClient(now), configuration)
+                .GetAwaiter()
+                .GetResult());
+
+            Assert(failure is HttpRequestException
+            {
+                StatusCode: var observedStatus,
+                InnerException: ActiveProbeProtocolException { IsGlobalConfigurationFailure: true } protocolException
+            } && observedStatus == statusCode,
+                "A structured non-success global probe error was converted to a node result or lost its status.");
+            Assert(((ActiveProbeProtocolException)((HttpRequestException)failure).InnerException!).ApiCode == apiCode,
+                "A structured non-success global probe error did not retain its categorical code.");
+            Assert(!failure.Message.Contains("sensitive-upstream-detail", StringComparison.Ordinal),
+                "A structured non-success probe error leaked its server detail.");
+            Assert(!failure.InnerException!.Message.Contains("sensitive-upstream-detail", StringComparison.Ordinal),
+                "The structured non-success probe classification retained its server detail.");
+        }
     }
 
     internal static void TestActiveProbeServiceReturnsSanitizedRecoverableDetails()
@@ -650,6 +692,37 @@ internal static partial class CoreTestCases
             .GetResult());
         Assert(canceled is OperationCanceledException,
             "A caller cancellation was converted to a selected-Key node result.");
+    }
+
+    internal static void TestActiveProbeServicePropagatesLocalConfigurationFailures()
+    {
+        var now = new DateTimeOffset(2026, 7, 24, 11, 0, 0, TimeSpan.Zero);
+        var configuration = new ActiveProbeConfiguration(
+            "https://example.test", "probe-key-value", "probe-model", 10, "openai");
+        var localFailure = new FormatException("synthetic local configuration failure");
+
+        var selectedFailure = CaptureException(() => new ActiveProviderProbeService(
+                new StubUpstreamProbeClient(_ => Task.FromException<ActiveProbeMeasurement>(localFailure)),
+                () => now)
+            .CheckSelectedKeyAsync(new StubRoutingClient(now), configuration)
+            .GetAwaiter()
+            .GetResult());
+        Assert(ReferenceEquals(selectedFailure, localFailure),
+            "A local selected-Key configuration failure was converted to a node result.");
+
+        var account = new StubRoutingClient(now)
+        {
+            ProvidersOverride = [Provider(2, 0.01, true, 1, now)],
+            GroupsOverride = [Group(1), Group(2)]
+        };
+        var cycleFailure = CaptureException(() => new ActiveProviderProbeService(
+                new StubUpstreamProbeClient(_ => Task.FromException<ActiveProbeMeasurement>(localFailure)),
+                () => now)
+            .RunCycleAsync(account, configuration, account.ProvidersOverride, account.GroupsOverride, ProviderBlocklist.Empty)
+            .GetAwaiter()
+            .GetResult());
+        Assert(ReferenceEquals(cycleFailure, localFailure),
+            "A local cycle configuration failure was converted to a node result.");
     }
 
     internal static void TestActiveProbeKeyPersistsOnlyInCredentials()

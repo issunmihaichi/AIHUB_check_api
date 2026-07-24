@@ -139,7 +139,12 @@ public sealed class ActiveProbeProtocolException : InvalidOperationException
     {
         var value = apiCode?.Trim();
         if (string.IsNullOrEmpty(value) || value.Length > 64 ||
-            value.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not '_' and not '-' and not '.') ||
+            value.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not '_' and not '-' and not '.'))
+        {
+            return null;
+        }
+
+        if (!IsGlobalConfigurationCode(value) &&
             IsCredentialShapedCode(value))
         {
             return null;
@@ -258,9 +263,10 @@ public sealed class OpenAiStreamingProbeClient : IUpstreamProbeClient
             cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
+            var protocolException = await TryReadJsonFailureAsync(response.Content, cancellationToken);
             throw new HttpRequestException(
                 $"Active probe request failed with HTTP {(int)response.StatusCode}.",
-                inner: null,
+                protocolException,
                 response.StatusCode);
         }
 
@@ -374,6 +380,33 @@ public sealed class OpenAiStreamingProbeClient : IUpstreamProbeClient
         {
             var envelope = ApiResponseEnvelope.Classify(document.RootElement);
             throw new ActiveProbeProtocolException(envelope.IsFailure ? envelope.ApiCode : null);
+        }
+    }
+
+    private static async Task<ActiveProbeProtocolException?> TryReadJsonFailureAsync(
+        HttpContent content,
+        CancellationToken cancellationToken)
+    {
+        if (!IsJsonMediaType(content.Headers.ContentType?.MediaType))
+        {
+            return null;
+        }
+
+        await using var stream = await content.ReadAsStreamAsync(cancellationToken);
+        JsonDocument document;
+        try
+        {
+            document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+
+        using (document)
+        {
+            var envelope = ApiResponseEnvelope.Classify(document.RootElement);
+            return envelope.IsFailure ? new ActiveProbeProtocolException(envelope.ApiCode) : null;
         }
     }
 
@@ -532,13 +565,17 @@ public sealed class ActiveProviderProbeService
             return false;
         }
 
-        if (exception is HttpRequestException { StatusCode: HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden })
+        if (exception is HttpRequestException
+            {
+                InnerException: ActiveProbeProtocolException { IsGlobalConfigurationFailure: true }
+            })
         {
             detail = string.Empty;
             return false;
         }
 
-        if (exception is ActiveProbeProtocolException { IsGlobalConfigurationFailure: true })
+        if (exception is HttpRequestException { StatusCode: HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden } ||
+            exception is ActiveProbeProtocolException { IsGlobalConfigurationFailure: true })
         {
             detail = string.Empty;
             return false;
@@ -546,11 +583,21 @@ public sealed class ActiveProviderProbeService
 
         detail = exception switch
         {
-            HttpRequestException { StatusCode: { } statusCode } => $"http-{(int)statusCode}",
+            HttpRequestException { StatusCode: null } => "probe-failed",
+            HttpRequestException { StatusCode: HttpStatusCode.RequestTimeout } => "http-408",
+            HttpRequestException { StatusCode: HttpStatusCode.TooManyRequests } => "http-429",
+            HttpRequestException { StatusCode: { } statusCode } when (int)statusCode >= 500 => $"http-{(int)statusCode}",
             ActiveProbeProtocolException protocolException => protocolException.Detail,
+            OperationCanceledException => "probe-failed",
+            IOException => "probe-failed",
             _ => "probe-failed"
         };
-        return true;
+        return exception is ActiveProbeProtocolException or OperationCanceledException or IOException ||
+            exception is HttpRequestException
+            {
+                StatusCode: null or HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests
+            } ||
+            exception is HttpRequestException { StatusCode: { } httpStatus } && (int)httpStatus >= 500;
     }
 
     private static IEnumerable<GroupInfo> SelectProbeGroups(
