@@ -147,6 +147,7 @@ internal static class TestCatalog
         new TestCase("No candidate keeps route state", CoreTestCases.TestNoCandidateDecision),
         new TestCase("Route state persists atomically", CoreTestCases.TestRouteStateRoundtrip),
         new TestCase("Unreadable route state resets safely", CoreTestCases.TestUnreadableRouteStateResets),
+        new TestCase("RoutingService retains seven-parameter constructor", CoreTestCases.TestRoutingServiceRetainsSevenParameterConstructor),
         new TestCase("Dry run never updates a Key", CoreTestCases.TestDryRunNeverUpdatesKey),
         new TestCase("Account data is cached but monitor data is fresh", CoreTestCases.TestAccountDataCache),
         new TestCase("Routing result exposes cached user rates", CoreTestCases.TestRoutingResultExposesUserRates),

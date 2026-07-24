@@ -989,6 +989,23 @@ internal static partial class CoreTestCases
         }
     }
 
+    internal static void TestRoutingServiceRetainsSevenParameterConstructor()
+    {
+        var constructor = typeof(RoutingService).GetConstructor(
+        [
+            typeof(PersistentAppSettings),
+            typeof(PersistentCredentials),
+            typeof(IRouteStateStore),
+            typeof(IAIHubClientFactory),
+            typeof(Func<PersistentCredentials, CancellationToken, Task>),
+            typeof(Func<DateTimeOffset>),
+            typeof(ProviderMetricsRollingWindow)
+        ]);
+
+        Assert(constructor is not null,
+            "RoutingService no longer exposes its seven-parameter public constructor.");
+    }
+
     internal static void TestDryRunNeverUpdatesKey()
     {
         var now = DateTimeOffset.UtcNow;

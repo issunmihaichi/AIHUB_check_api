@@ -53,6 +53,26 @@ public sealed class RoutingService : IDisposable
         PersistentAppSettings settings,
         PersistentCredentials credentials,
         IRouteStateStore stateStore,
+        IAIHubClientFactory? clientFactory,
+        Func<PersistentCredentials, CancellationToken, Task>? persistCredentials,
+        Func<DateTimeOffset>? utcNow,
+        ProviderMetricsRollingWindow? providerMetrics)
+        : this(
+            settings,
+            credentials,
+            stateStore,
+            clientFactory,
+            persistCredentials,
+            utcNow,
+            providerMetrics,
+            upstreamProbeFactory: null)
+    {
+    }
+
+    public RoutingService(
+        PersistentAppSettings settings,
+        PersistentCredentials credentials,
+        IRouteStateStore stateStore,
         IAIHubClientFactory? clientFactory = null,
         Func<PersistentCredentials, CancellationToken, Task>? persistCredentials = null,
         Func<DateTimeOffset>? utcNow = null,
