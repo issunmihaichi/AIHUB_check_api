@@ -20,14 +20,19 @@ internal static class TestFixtures
         double rate,
         bool available,
         double success,
-        DateTimeOffset checkedAt,
+        DateTimeOffset? checkedAt,
         double? latency = 1000,
         bool warning = false,
         double? outputTps = 20,
         DateTimeOffset? lastCallEndedAt = null,
         bool enabled = true,
         DateTimeOffset? lastCallAt = null,
-        string? id = null)
+        string? id = null,
+        DateTimeOffset? activeProbeCheckedAt = null,
+        bool includeSuccess = true,
+        bool? activeProbeHealthy = null,
+        int activeProbeSampleCount = 0,
+        double? activeProbeLatency = null)
     {
         return new ProviderStatus
         {
@@ -39,11 +44,17 @@ internal static class TestFixtures
             Available = available,
             Enabled = enabled,
             CheckedAt = checkedAt,
+            ActiveProbeHealthy = activeProbeHealthy,
+            ActiveProbeCheckedAt = activeProbeCheckedAt,
+            ActiveProbeSampleCount = activeProbeSampleCount,
+            ActiveProbeFirstTokenLatencyMs = activeProbeLatency,
             LastCallEndedAt = lastCallEndedAt,
             LastCallAt = lastCallAt,
             FirstTokenLatencyMs = latency,
             OutputTokensPerSecond = outputTps,
-            SuccessRates = new Dictionary<string, double> { ["6h"] = success },
+            SuccessRates = includeSuccess
+                ? new Dictionary<string, double> { ["6h"] = success }
+                : new Dictionary<string, double>(),
             WarningReasons = warning
                 ? [new ProviderWarningReason { Type = "synthetic_warning", Message = "synthetic warning" }]
                 : []
@@ -62,14 +73,14 @@ internal static class TestFixtures
         };
     }
 
-    internal static RoutingCriteria Criteria() => new("openai", 0, TimeSpan.FromMinutes(15));
+    internal static RoutingCriteria Criteria() => new("openai", 0, RoutingEngine.DefaultMaximumStatusAge);
 
     internal static BalancedRoutingPolicy Policy(RoutingMode mode) => new()
     {
         Platform = "openai",
         Mode = mode,
         MinimumSuccessRate6h = 0,
-        MaximumStatusAge = TimeSpan.FromMinutes(15)
+        MaximumStatusAge = RoutingEngine.DefaultMaximumStatusAge
     };
 
     internal static void Assert(bool condition, string message)
@@ -110,6 +121,7 @@ internal sealed class StubRoutingClient(DateTimeOffset now) : IAIHubApiClient
     public int RatesCalls { get; private set; }
     public int KeysCalls { get; private set; }
     public int UpdateCalls { get; private set; }
+    public List<long> UpdatedGroupIds { get; } = [];
     public int RefreshCalls { get; private set; }
     public int LoginCalls { get; private set; }
     public bool FailFirstSummaryAuth { get; init; }
@@ -121,6 +133,8 @@ internal sealed class StubRoutingClient(DateTimeOffset now) : IAIHubApiClient
     public double? UserRateOverride { get; init; }
     public IReadOnlyList<ProviderStatus>? ProvidersOverride { get; init; }
     public IReadOnlyList<GroupInfo>? GroupsOverride { get; init; }
+    public Action<long, long, CancellationToken>? AfterRemoteKeyGroupUpdate { get; init; }
+    public Func<long, long, ApiKeyInfo, ApiKeyInfo?>? RemoteKeyGroupUpdateResult { get; init; }
 
     public Task<MonitorSummary> GetProviderSummaryAsync(CancellationToken cancellationToken = default)
     {
@@ -188,19 +202,27 @@ internal sealed class StubRoutingClient(DateTimeOffset now) : IAIHubApiClient
     public Task<ApiKeyInfo> UpdateKeyGroupAsync(long keyId, long groupId, CancellationToken cancellationToken = default)
     {
         UpdateCalls++;
+        UpdatedGroupIds.Add(groupId);
+        AfterRemoteKeyGroupUpdate?.Invoke(keyId, groupId, cancellationToken);
         if (UpdateCalls <= FailUpdateCount)
         {
             throw new InvalidOperationException("synthetic update failure");
         }
 
-        return Task.FromResult(new ApiKeyInfo
+        var updated = new ApiKeyInfo
         {
             Id = keyId,
             Name = $"Synthetic Key {keyId}",
             Status = "active",
             GroupId = groupId,
             Group = GroupForStub(groupId)
-        });
+        };
+        if (RemoteKeyGroupUpdateResult is { } updateResult)
+        {
+            return Task.FromResult(updateResult(keyId, groupId, updated)!);
+        }
+
+        return Task.FromResult(updated);
     }
 
     private static ProviderStatus ProviderForStub(long groupId, DateTimeOffset checkedAt) => new()

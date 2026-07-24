@@ -21,8 +21,16 @@ internal sealed class ProviderGridRow
     public string DecisionState { get; init; } = string.Empty;
     public string BlockStatus { get; init; } = string.Empty;
     public string State { get; init; } = string.Empty;
-    public string Success6h => Source.SuccessRate6h is { } rate ? $"{rate:P1}" : "-";
-    public string FirstToken => Source.FirstTokenLatencyMs is { } latency ? $"{latency:0} ms" : "-";
+    public bool UsesActiveProbeLatency { get; init; }
+    public string Success6h => Source.SuccessRate6h is not null
+        ? $"{RoutingEngine.NormalizeSuccessRate(Source.SuccessRate6h):P1}"
+        : "-";
+    public string FirstToken => UsesActiveProbeLatency && Source.ActiveProbeFirstTokenLatencyMs is { } activeLatency
+        ? $"{activeLatency:0} ms"
+        : Source.FirstTokenLatencyMs is { } latency ? $"{latency:0} ms" : "-";
+    public string FirstTokenSource => UsesActiveProbeLatency && Source.ActiveProbeFirstTokenLatencyMs is { } latency
+        ? $"本机中位数 {latency:0} ms / 共 {Source.ActiveProbeSampleCount} 次探测"
+        : "运营商上报";
     public string CheckedAt => Source.CheckedAt?.ToLocalTime().ToString("MM-dd HH:mm:ss") ?? "-";
 }
 
@@ -32,6 +40,8 @@ internal sealed class KeyGridRow
     public long Id { get; init; }
     public string Name { get; init; } = string.Empty;
     public string Status { get; init; } = string.Empty;
+    public string Purpose { get; init; } = string.Empty;
+    public bool IsProbeKey { get; init; }
     public long? GroupId { get; set; }
     public string GroupName { get; set; } = "未绑定";
     public string Platform { get; set; } = "-";

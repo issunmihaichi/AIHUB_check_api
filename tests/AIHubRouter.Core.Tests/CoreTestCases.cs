@@ -83,7 +83,7 @@ internal static partial class CoreTestCases
             Provider(1, 0.01, true, 0.49, now),
             Provider(2, 0.05, true, 0.99, now)
         };
-        var criteria = new RoutingCriteria("openai", 0.5, TimeSpan.FromMinutes(15));
+        var criteria = new RoutingCriteria("openai", 0.5, RoutingEngine.DefaultMaximumStatusAge);
 
         var result = RoutingEngine.SelectCheapest(providers, new[] { Group(1), Group(2) }, new Dictionary<long, double>(), criteria, now);
         Assert(result?.Group.Id == 2, "Low-availability group was not rejected.");
@@ -141,7 +141,7 @@ internal static partial class CoreTestCases
             [provider],
             [Group(1)],
             new Dictionary<long, double>(),
-            new RoutingCriteria("openai", 0.9, TimeSpan.FromMinutes(15)),
+            new RoutingCriteria("openai", 0.9, RoutingEngine.DefaultMaximumStatusAge),
             now);
 
         Assert(result?.Group.Id == 1 && result.Provider.HasWarnings,
@@ -154,14 +154,16 @@ internal static partial class CoreTestCases
         var result = RoutingEngine.SelectCheapest(
             [
                 Provider(1, 0.01, available: false, success: 1, now),
-                Provider(2, 0.02, available: true, success: 0.95, now)
+                Provider(2, 0.02, available: true, success: 1, now, enabled: false),
+                Provider(3, 0.03, available: true, success: 0.95, now)
             ],
-            [Group(1), Group(2)],
+            [Group(1), Group(2), Group(3)],
             new Dictionary<long, double>(),
-            new RoutingCriteria("openai", 0.9, TimeSpan.FromMinutes(15)),
+            new RoutingCriteria("openai", 0.9, RoutingEngine.DefaultMaximumStatusAge),
             now);
 
-        Assert(result?.Group.Id == 2, "Latest unavailable state did not control eligibility.");
+        Assert(result?.Group.Id == 3,
+            "Latest unavailable or disabled state did not remain a hard eligibility exclusion.");
     }
 
     internal static void TestWarningPresentationExcludesServerMessage()
@@ -191,7 +193,7 @@ internal static partial class CoreTestCases
             effectiveMultiplier: provider.PriceMultiplier,
             minimumSuccessRate6h: 0.9,
             now: now,
-            maximumStatusAge: TimeSpan.FromMinutes(15));
+            maximumStatusAge: RoutingEngine.DefaultMaximumStatusAge);
         Assert(state == "当前异常", "An unavailable warning provider was shown as routable.");
     }
 
@@ -206,7 +208,7 @@ internal static partial class CoreTestCases
             effectiveMultiplier: provider.PriceMultiplier,
             minimumSuccessRate6h: 0.5,
             now: now,
-            maximumStatusAge: TimeSpan.FromMinutes(15));
+            maximumStatusAge: RoutingEngine.DefaultMaximumStatusAge);
         Assert(state == "低于阈值", "Warning decoration bypassed the local availability threshold.");
         Assert(!ProviderStatusPresentation.IsRoutable(
                 provider,
@@ -215,7 +217,7 @@ internal static partial class CoreTestCases
                 effectiveMultiplier: provider.PriceMultiplier,
                 minimumSuccessRate6h: 0.5,
                 now: now,
-                maximumStatusAge: TimeSpan.FromMinutes(15)),
+                maximumStatusAge: RoutingEngine.DefaultMaximumStatusAge),
             "A provider below the local availability threshold was marked routable.");
     }
 
@@ -230,21 +232,50 @@ internal static partial class CoreTestCases
             effectiveMultiplier: -0.1,
             minimumSuccessRate6h: 0.9,
             now: now,
-            maximumStatusAge: TimeSpan.FromMinutes(15));
+            maximumStatusAge: RoutingEngine.DefaultMaximumStatusAge);
         Assert(state == "倍率无效", "An invalid effective rate was shown as routable.");
     }
 
-    internal static void TestStaleStatusRejection()
+    internal static void TestStaleStatusRemainsRoutable()
     {
         var now = DateTimeOffset.UtcNow;
-        var providers = new[]
-        {
-            Provider(1, 0.01, true, 1, now - TimeSpan.FromMinutes(16)),
-            Provider(2, 0.05, true, 1, now)
-        };
+        var staleProvider = Provider(1, 0.01, true, 1, now.AddHours(-1), latency: null, outputTps: null);
+        var noEvidenceProvider = Provider(2, 0.02, true, 1, checkedAt: null, latency: null, outputTps: null);
+        var result = RoutingEngine.SelectCheapest(
+            [staleProvider, noEvidenceProvider],
+            [Group(1), Group(2)],
+            new Dictionary<long, double>(),
+            Criteria(),
+            now);
 
-        var result = RoutingEngine.SelectCheapest(providers, new[] { Group(1), Group(2) }, new Dictionary<long, double>(), Criteria(), now);
-        Assert(result?.Group.Id == 2, "Stale provider status was not rejected.");
+        Assert(result?.Group.Id == 1, "A stale provider with timestamp evidence was not eligible.");
+        Assert(ProviderStatusPresentation.IsRoutable(
+                staleProvider,
+                hasAccountData: true,
+                isAuthorized: true,
+                effectiveMultiplier: staleProvider.PriceMultiplier,
+                minimumSuccessRate6h: 0,
+                now,
+                Criteria().MaximumStatusAge),
+            "Presentation eligibility rejected stale timestamp evidence accepted by routing.");
+        Assert(ProviderStatusPresentation.ResolveRoutingState(
+                staleProvider,
+                hasAccountData: true,
+                isAuthorized: true,
+                effectiveMultiplier: staleProvider.PriceMultiplier,
+                minimumSuccessRate6h: 0,
+                now,
+                Criteria().MaximumStatusAge) == "数据陈旧（已降权）",
+            "Stale eligible evidence did not use the exact downweighted presentation state.");
+        Assert(!ProviderStatusPresentation.IsRoutable(
+                noEvidenceProvider,
+                hasAccountData: true,
+                isAuthorized: true,
+                effectiveMultiplier: noEvidenceProvider.PriceMultiplier,
+                minimumSuccessRate6h: 0,
+                now,
+                Criteria().MaximumStatusAge),
+            "Presentation eligibility accepted a provider without timestamp or performance evidence.");
     }
 
     internal static void TestRoutingPreferenceDefaults()
@@ -252,11 +283,12 @@ internal static partial class CoreTestCases
         var settings = new PersistentAppSettings();
         Assert(settings.RoutingMode == RoutingMode.Economy, "New installs must preserve lowest-price routing.");
         Assert(settings.DurationCategory == TaskDurationCategory.Medium, "New installs must default to Medium duration.");
-        Assert(settings.BalancedCountdownSeconds == 7_200, "Balanced countdown must preserve the Medium default.");
         Assert(settings.BalancedExpectedOutputTokens == 1_000,
-            "Balanced expected output token budget must default independently from the countdown.");
+            "Balanced expected output token budget must default independently from task size.");
         Assert(settings.BalancedDeadlineSoftSeconds == 5, "Balanced deadline soft tolerance must default to five seconds.");
         Assert(settings.AccountCacheSeconds == 300, "Account cache default changed.");
+        Assert(settings.ActiveProbeIntervalSeconds == 90,
+            "New installs must check the selected Key every ninety seconds.");
         Assert(settings.Theme == WinFormsTheme.System, "Theme must follow Windows by default.");
     }
 
@@ -275,8 +307,6 @@ internal static partial class CoreTestCases
             {
                 RoutingMode = RoutingMode.Speed,
                 DurationCategory = TaskDurationCategory.Long,
-                BalancedCountdownSeconds = 1_234.5,
-                BalancedCountdownEndsAtUtc = DateTimeOffset.Parse("2026-07-21T10:00:00Z"),
                 BalancedExpectedOutputTokens = 12_345,
                 BalancedDeadlineSoftSeconds = 8.5,
                 AccountCacheSeconds = 90,
@@ -286,16 +316,30 @@ internal static partial class CoreTestCases
             var loaded = store.Load().Settings;
             Assert(loaded.RoutingMode == RoutingMode.Speed, "Routing mode did not roundtrip.");
             Assert(loaded.DurationCategory == TaskDurationCategory.Long, "Duration category did not roundtrip.");
-            Assert(Math.Abs(loaded.BalancedCountdownSeconds - 1_234.5) < 0.0001,
-                "Balanced countdown duration did not roundtrip.");
-            Assert(loaded.BalancedCountdownEndsAtUtc == DateTimeOffset.Parse("2026-07-21T10:00:00Z"),
-                "Balanced countdown end timestamp did not roundtrip.");
             Assert(loaded.BalancedExpectedOutputTokens == 12_345,
                 "Balanced expected output token budget did not roundtrip.");
             Assert(Math.Abs(loaded.BalancedDeadlineSoftSeconds - 8.5) < 0.0001,
                 "Balanced deadline soft tolerance did not roundtrip.");
             Assert(loaded.AccountCacheSeconds == 90, "Cache duration did not roundtrip.");
             Assert(loaded.Theme == WinFormsTheme.Dark, "Theme did not roundtrip.");
+
+            File.WriteAllText(Path.Combine(directory, "settings.json"), """
+                {
+                  "durationCategory": 2,
+                  "balancedCountdownSeconds": 7200,
+                  "balancedCountdownEndsAtUtc": "2026-07-24T00:00:00Z"
+                }
+                """);
+            var migrated = store.Load().Settings;
+            Assert(migrated.DurationCategory == TaskDurationCategory.Long,
+                "Legacy countdown settings did not preserve task size.");
+
+            File.WriteAllText(Path.Combine(directory, "settings.json"), """
+                { "durationCategory": 99 }
+                """);
+            var normalized = store.Load().Settings;
+            Assert(normalized.DurationCategory == TaskDurationCategory.Medium,
+                "An unknown persisted task size did not use the Medium default.");
         }
         finally
         {

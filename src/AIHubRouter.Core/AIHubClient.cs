@@ -6,7 +6,12 @@ using System.Text.Json.Serialization;
 
 namespace AIHubRouter.Core;
 
-public interface IAIHubApiClient : IDisposable
+public interface IActiveProbeKeyReader
+{
+    Task<IReadOnlyList<ApiKeyInfo>> GetAllKeysAsync(CancellationToken cancellationToken = default);
+}
+
+public interface IAIHubApiClient : IDisposable, IActiveProbeKeyReader
 {
     Task<MonitorSummary> GetProviderSummaryAsync(CancellationToken cancellationToken = default);
     Task<JsonElement> ValidateLoginAsync(CancellationToken cancellationToken = default);
@@ -14,7 +19,6 @@ public interface IAIHubApiClient : IDisposable
     Task<AuthSession> RefreshSessionAsync(string refreshToken, CancellationToken cancellationToken = default);
     Task<IReadOnlyList<GroupInfo>> GetAvailableGroupsAsync(CancellationToken cancellationToken = default);
     Task<IReadOnlyDictionary<long, double>> GetUserGroupRatesAsync(CancellationToken cancellationToken = default);
-    Task<IReadOnlyList<ApiKeyInfo>> GetAllKeysAsync(CancellationToken cancellationToken = default);
     Task<ApiKeyInfo> UpdateKeyGroupAsync(long keyId, long groupId, CancellationToken cancellationToken = default);
 }
 
@@ -242,24 +246,17 @@ public sealed class AIHubClient : IAIHubApiClient
                     isAuthenticationRequest: isAuthenticationEndpoint);
             }
 
-            var root = document.RootElement;
-            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("code", out var codeElement))
+            var envelope = ApiResponseEnvelope.Classify(document.RootElement);
+            if (envelope.IsFailure)
             {
-                var code = ReadCode(codeElement);
-                if (code != "0")
-                {
-                    throw CreateApiException(response.StatusCode, root, isAuthenticationEndpoint);
-                }
-
-                if (!root.TryGetProperty("data", out root))
-                {
-                    throw new AIHubApiException(
-                        "服务器响应缺少 data 字段。",
-                        response.StatusCode,
-                        code,
-                        isAuthenticationEndpoint);
-                }
+                throw CreateEnvelopeException(
+                    response.StatusCode,
+                    envelope.ApiCode,
+                    envelope.Outcome,
+                    isAuthenticationEndpoint);
             }
+
+            var root = envelope.Payload;
 
             if (root.ValueKind == JsonValueKind.Null)
             {
@@ -276,6 +273,11 @@ public sealed class AIHubClient : IAIHubApiClient
 
             try
             {
+                if (typeof(T) == typeof(JsonElement))
+                {
+                    return (T)(object)root.Clone();
+                }
+
                 return root.Deserialize<T>(JsonOptions)
                     ?? throw new AIHubApiException(
                         "无法读取服务器响应。",
@@ -290,6 +292,18 @@ public sealed class AIHubClient : IAIHubApiClient
                     isAuthenticationRequest: isAuthenticationEndpoint);
             }
         }
+    }
+
+    private static AIHubApiException CreateEnvelopeException(
+        HttpStatusCode statusCode,
+        string? apiCode,
+        ApiResponseEnvelopeOutcome outcome,
+        bool isAuthenticationEndpoint)
+    {
+        var message = outcome == ApiResponseEnvelopeOutcome.MissingPayload
+            ? "The server response did not contain a usable payload."
+            : "The server returned an API-level failure.";
+        return new AIHubApiException(message, statusCode, apiCode, isAuthenticationEndpoint);
     }
 
     private static AIHubApiException CreateApiException(

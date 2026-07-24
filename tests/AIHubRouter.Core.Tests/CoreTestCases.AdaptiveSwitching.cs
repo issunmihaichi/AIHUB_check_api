@@ -219,18 +219,18 @@ internal static partial class CoreTestCases
             ],
             [Group(1), Group(2)],
             new Dictionary<long, double>(),
-            Policy(RoutingMode.Balanced),
+            Policy(RoutingMode.Speed),
             now);
         var result = RouteDecisionEngine.Decide(
             evaluation,
             new RouteState { CurrentGroupId = 1 },
-            Policy(RoutingMode.Balanced),
-            new AdaptiveRoutingContext(RoutingMode.Balanced, TaskDurationCategory.Medium, 10),
+            Policy(RoutingMode.Speed),
+            new AdaptiveRoutingContext(RoutingMode.Speed, TaskDurationCategory.Medium, 10),
             now,
             observedCurrentGroupId: 1);
         Assert(!result.Decision.ShouldSwitch && result.Decision.Target?.Group.Id == 1,
             "A rejected adaptive candidate replaced the current group.");
-        Assert(result.Decision.Reason == RouteDecisionReason.AdaptiveBalancedRejected,
+        Assert(result.Decision.Reason == RouteDecisionReason.AdaptiveSpeedRejected,
             "The rejection did not expose its adaptive reason.");
     }
 
@@ -282,7 +282,7 @@ internal static partial class CoreTestCases
             0.09,
             false);
         var acceptedCandidate = new RouteCandidate(
-            Provider(3, 0.01, true, 0.99, now, 1_000, outputTps: 100),
+            Provider(3, 0.01, true, 0.99, now, 1_000, outputTps: 150),
             Group(3),
             0.01,
             false);
@@ -298,8 +298,8 @@ internal static partial class CoreTestCases
         var result = RouteDecisionEngine.Decide(
             evaluation,
             new RouteState { CurrentGroupId = 1 },
-            Policy(RoutingMode.Balanced),
-            new AdaptiveRoutingContext(RoutingMode.Balanced, TaskDurationCategory.Medium, 10),
+            Policy(RoutingMode.Speed),
+            new AdaptiveRoutingContext(RoutingMode.Speed, TaskDurationCategory.Medium, 10),
             now,
             observedCurrentGroupId: 1);
 
@@ -307,7 +307,7 @@ internal static partial class CoreTestCases
             "Adaptive traversal did not select the accepted candidate beyond the weighted winner.");
         Assert(Math.Abs(result.Decision.PricePremiumPercent) < 1e-12,
             "Adaptive traversal reported the weighted winner's price premium instead of the selected candidate's premium.");
-        Assert(result.Decision.Reason == RouteDecisionReason.AdaptiveBalancedAccepted,
+        Assert(result.Decision.Reason == RouteDecisionReason.AdaptiveSpeedAccepted,
             "Adaptive traversal did not preserve the accepted decision reason.");
     }
 
@@ -320,12 +320,12 @@ internal static partial class CoreTestCases
             0.10,
             false);
         var acceptedByNetSaving = new RouteCandidate(
-            Provider(2, 0.05, true, 0.99, now, 1_000, outputTps: 100),
+            Provider(2, 0.05, true, 0.99, now, 1_000, outputTps: 130),
             Group(2),
             0.05,
             false);
         var bestNetSaving = new RouteCandidate(
-            Provider(3, 0.02, true, 0.99, now, 1_000, outputTps: 100),
+            Provider(3, 0.02, true, 0.99, now, 1_000, outputTps: 130),
             Group(3),
             0.02,
             false);
@@ -346,8 +346,8 @@ internal static partial class CoreTestCases
         var result = RouteDecisionEngine.Decide(
             evaluation,
             new RouteState { CurrentGroupId = 1 },
-            Policy(RoutingMode.Balanced),
-            new AdaptiveRoutingContext(RoutingMode.Balanced, TaskDurationCategory.Medium, 10),
+            Policy(RoutingMode.Speed),
+            new AdaptiveRoutingContext(RoutingMode.Speed, TaskDurationCategory.Medium, 10),
             now,
             observedCurrentGroupId: 1);
 
@@ -362,7 +362,7 @@ internal static partial class CoreTestCases
             "Adaptive rankings did not retain the provider that was actually evaluated.");
         Assert(!rankings.Single(ranking => ranking.GroupId == 4).Accepted &&
             rankings.Single(ranking => ranking.GroupId == 4).Rank is null &&
-            rankings.Single(ranking => ranking.GroupId == 4).Reason == AdaptiveDecisionReason.BalancedGuardRejected,
+            rankings.Single(ranking => ranking.GroupId == 4).Reason == AdaptiveDecisionReason.SpeedGuardRejected,
             "Rejected adaptive candidates incorrectly occupied a suggestion rank.");
     }
 
@@ -373,19 +373,19 @@ internal static partial class CoreTestCases
             [Provider(2, 0.02, true, 0.99, now, 1_000, outputTps: 0)],
             [Group(2)],
             new Dictionary<long, double>(),
-            Policy(RoutingMode.Balanced),
+            Policy(RoutingMode.Speed),
             now);
         var initial = RouteDecisionEngine.Decide(
             evaluation,
             new RouteState(),
-            Policy(RoutingMode.Balanced),
-            new AdaptiveRoutingContext(RoutingMode.Balanced, TaskDurationCategory.Short, 10),
+            Policy(RoutingMode.Speed),
+            new AdaptiveRoutingContext(RoutingMode.Speed, TaskDurationCategory.Short, 10),
             now);
         var invalid = RouteDecisionEngine.Decide(
             evaluation,
             new RouteState { CurrentGroupId = 9 },
-            Policy(RoutingMode.Balanced),
-            new AdaptiveRoutingContext(RoutingMode.Balanced, TaskDurationCategory.Short, 10),
+            Policy(RoutingMode.Speed),
+            new AdaptiveRoutingContext(RoutingMode.Speed, TaskDurationCategory.Short, 10),
             now,
             observedCurrentGroupId: 9);
 

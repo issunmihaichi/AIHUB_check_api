@@ -58,6 +58,7 @@ internal sealed partial class MainForm
             _groups = await groupsTask;
             _rawUserRates = await ratesTask;
             ApplyKeys(await keysTask);
+            _hasAuthenticatedAccountData = true;
         }
 
         var metrics = _providerMetrics.Observe(DateTimeOffset.UtcNow, rawSummary.Apis, _rawUserRates);
@@ -120,7 +121,8 @@ internal sealed partial class MainForm
             RefreshToken = _currentSession?.RefreshToken ?? string.Empty,
             AccessTokenExpiresAt = _currentSession?.ExpiresAt,
             Cookie = _cookieText.Text,
-            UserAgent = _userAgentText.Text
+            UserAgent = _userAgentText.Text,
+            ActiveProbeApiKey = _activeProbeApiKey
         };
         _routingService = new RoutingService(
             settings,
@@ -133,10 +135,27 @@ internal sealed partial class MainForm
 
     private void ApplyRoutingCycleResult(RoutingCycleResult result)
     {
+        var forcedGroupBeforeCycle = _forcedGroupId;
+        if (!result.DryRun)
+        {
+            _forcedGroupId = result.NextRouteState.ForcedGroupId;
+        }
+        else if (forcedGroupBeforeCycle is not null && result.NextRouteState.ForcedGroupId is null)
+        {
+            _forcedGroupId = null;
+            var storageDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "AIHubRouter");
+            TryPersistForcedGroupState(new JsonRouteStateStore(storageDirectory), null);
+        }
+        var displayedForcedGroupId = result.DryRun
+            ? _forcedGroupId
+            : result.NextRouteState.ForcedGroupId;
         _lastEvaluation = result.Evaluation;
         _summary = new MonitorSummary { Apis = result.Providers.ToList() };
         _groups = result.Groups;
         _userRates = result.UserGroupRates;
+        _hasAuthenticatedAccountData = true;
         _adaptiveRankings = result.Decision.AdaptiveRankings;
         _bestCandidate = result.Decision.Target;
         ApplyKeys(result.Keys);
@@ -145,11 +164,15 @@ internal sealed partial class MainForm
         var candidateLookup = result.Evaluation.EligibleCandidates.ToDictionary(
             candidate => candidate.Provider.Id,
             StringComparer.Ordinal);
+        var eligibleGroupIds = result.Evaluation.EligibleCandidates
+            .Select(candidate => candidate.Group.Id)
+            .ToHashSet();
         var adaptiveRankingLookup = result.Decision.AdaptiveRankings.ToDictionary(
             ranking => ranking.ProviderId,
             StringComparer.Ordinal);
         var minimumSuccessRate6h = (double)_minimumSuccessInput.Value / 100;
-        var maximumStatusAge = TimeSpan.FromMinutes(15);
+        var maximumStatusAge = RoutingEngine.DefaultMaximumStatusAge;
+        var activeProbeMaximumAge = CurrentActiveProbeMaximumAge();
         var rows = result.Providers
             .Where(provider => provider.Platform.Equals(_platformCombo.SelectedItem?.ToString() ?? "openai", StringComparison.OrdinalIgnoreCase))
             .Select(provider =>
@@ -172,7 +195,17 @@ internal sealed partial class MainForm
                     : null;
                 var blockReason = _providerBlocklist.GetBlockingReason(provider, group);
                 var isBlocked = blockReason != ProviderBlockReason.None;
-                if (!hasCandidate || isBlocked)
+                var isForcedGroup = groupId is { } forcedGroupId && forcedGroupId == displayedForcedGroupId;
+                if (isForcedGroup)
+                {
+                    adaptiveRank = "固定";
+                    adaptiveRankValue = 0;
+                    decisionState = groupId is { } forcedId &&
+                        eligibleGroupIds.Contains(forcedId) && !isBlocked
+                        ? "强制"
+                        : "强制失效";
+                }
+                else if (!hasCandidate || isBlocked)
                 {
                     decisionState = string.Empty;
                 }
@@ -185,19 +218,18 @@ internal sealed partial class MainForm
                     hasOverride = candidate.HasUserRateOverride;
                 }
 
-                var isAuthorized = group is not null;
-                var isRoutable = !isBlocked && ProviderStatusPresentation.IsRoutable(
-                    provider,
-                    hasAccountData: true,
-                    isAuthorized,
-                    effectiveMultiplier,
-                    minimumSuccessRate6h,
-                    result.Decision.EvaluatedAt,
-                    maximumStatusAge);
+                var selectedPlatform = _platformCombo.SelectedItem?.ToString() ?? "openai";
+                var isAuthorized = IsActiveGroupForPlatform(group, selectedPlatform);
+                var isRoutable = !isBlocked && groupId is { } eligibleGroupId &&
+                    eligibleGroupIds.Contains(eligibleGroupId);
                 var effective = $"{effectiveMultiplier:0.####}{(hasOverride ? " *" : string.Empty)}";
+                var displayProvider = RoutingEngine.ResolveActiveProbeMetrics(
+                    provider,
+                    result.Decision.EvaluatedAt,
+                    activeProbeMaximumAge);
                 return new ProviderGridRow
                 {
-                    Source = provider,
+                    Source = displayProvider,
                     IsRoutable = isRoutable,
                     IsBest = !isBlocked && provider.Id == result.Decision.Target?.Provider.Id,
                     IsBlocked = isBlocked,
@@ -208,6 +240,10 @@ internal sealed partial class MainForm
                     AdaptiveRankValue = adaptiveRankValue,
                     DecisionState = decisionState,
                     BlockStatus = BlockReasonText(blockReason),
+                    UsesActiveProbeLatency = RoutingEngine.UsesFreshActiveProbeLatency(
+                        provider,
+                        result.Decision.EvaluatedAt,
+                        activeProbeMaximumAge),
                     State = isBlocked ? "已拉黑" : ProviderStatusPresentation.ResolveRoutingState(
                         provider,
                         hasAccountData: true,
@@ -215,7 +251,8 @@ internal sealed partial class MainForm
                         effectiveMultiplier: effectiveMultiplier,
                         minimumSuccessRate6h: minimumSuccessRate6h,
                         now: result.Decision.EvaluatedAt,
-                        maximumStatusAge: maximumStatusAge)
+                        maximumStatusAge: maximumStatusAge,
+                        activeProbeMaximumAge: activeProbeMaximumAge)
                 };
             })
             .OrderByDescending(row => row.IsRoutable)
@@ -230,12 +267,19 @@ internal sealed partial class MainForm
             ? effectiveMode
             : $"{ModeDisplayName()}→{effectiveMode}";
         _candidateLabel.Text = result.Decision.Target is { } target
-            ? $"{modeText}：{target.Provider.PlanType}  {target.EffectiveMultiplier:0.####}x"
+            ? displayedForcedGroupId == target.Group.Id
+                ? $"强制：{target.Provider.PlanType}  {target.EffectiveMultiplier:0.####}x"
+                : $"{modeText}：{target.Provider.PlanType}  {target.EffectiveMultiplier:0.####}x"
             : "当前模式：无符合项";
 
         var reason = string.IsNullOrWhiteSpace(result.Decision.Detail)
             ? DecisionReasonText(result.Decision.Reason)
             : result.Decision.Detail;
+        if (forcedGroupBeforeCycle is { } clearedGroupId &&
+            result.NextRouteState.ForcedGroupId is null)
+        {
+            reason = $"强制分组 {clearedGroupId} 已不可用，已自动解除。{reason}";
+        }
         var changeText = result.DryRun
             ? $"模拟：{result.ChangedKeyCount} 个 Key 将切换"
             : $"已切换 {result.ChangedKeyCount} 个 Key";
@@ -379,8 +423,11 @@ internal sealed partial class MainForm
         var criteria = new RoutingCriteria(
             platform,
             (double)_minimumSuccessInput.Value / 100,
-            TimeSpan.FromMinutes(15),
-            _providerBlocklist);
+            RoutingEngine.DefaultMaximumStatusAge,
+            _providerBlocklist)
+        {
+            ActiveProbeMaximumAge = CurrentActiveProbeMaximumAge()
+        };
 
         var now = DateTimeOffset.UtcNow;
         var selectedGroupIds = CurrentKeyRows()
@@ -390,14 +437,14 @@ internal sealed partial class MainForm
             .Distinct()
             .ToArray();
         var observedGroupId = selectedGroupIds.Length == 1 ? selectedGroupIds[0] : (long?)null;
+        var storageDirectory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "AIHubRouter");
+        var stateStore = new JsonRouteStateStore(storageDirectory);
+        var previewState = stateStore.Load();
         var previewCurrentGroupId = observedGroupId;
-        var previewState = new RouteState();
         if (previewCurrentGroupId is null && selectedGroupIds.Length > 1)
         {
-            var storageDirectory = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "AIHubRouter");
-            previewState = new JsonRouteStateStore(storageDirectory).Load();
             previewCurrentGroupId = previewState.CurrentGroupId;
         }
         var policy = new BalancedRoutingPolicy
@@ -406,6 +453,7 @@ internal sealed partial class MainForm
             Mode = CurrentRoutingMode(),
             MinimumSuccessRate6h = criteria.MinimumSuccessRate6h,
             MaximumStatusAge = criteria.MaximumStatusAge,
+            ActiveProbeMaximumAge = criteria.ActiveProbeMaximumAge,
             Blocklist = _providerBlocklist
         };
         var snapshot = RouteDecisionCoordinator.Evaluate(
@@ -416,16 +464,23 @@ internal sealed partial class MainForm
             CurrentDurationCategory(),
             previewState with { CurrentGroupId = previewCurrentGroupId },
             now,
-            observedGroupId,
-            CurrentRoutingMode() == RoutingMode.Balanced
-                ? GetBalancedRemainingSeconds(now)
-                : null,
-            CurrentRoutingMode() == RoutingMode.Balanced
+            observedCurrentGroupId: observedGroupId,
+            balancedDeadlineSoftSeconds: CurrentRoutingMode() == RoutingMode.Balanced
                 ? _balancedDeadlineSoftSeconds
                 : null,
-            CurrentRoutingMode() == RoutingMode.Balanced
+            balancedExpectedOutputTokens: CurrentRoutingMode() == RoutingMode.Balanced
                 ? _balancedExpectedOutputTokens
                 : null);
+        if (_hasAuthenticatedAccountData &&
+            previewState.ForcedGroupId is not null &&
+            snapshot.Result.NextState.ForcedGroupId is null)
+        {
+            previewState = previewState.ReleaseForcedGroup();
+            TryPersistForcedGroupState(stateStore, null);
+        }
+        _forcedGroupId = _hasAuthenticatedAccountData
+            ? snapshot.Result.NextState.ForcedGroupId
+            : previewState.ForcedGroupId;
         _lastEvaluation = snapshot.Evaluation;
         _adaptiveRankings = snapshot.Result.Decision.AdaptiveRankings;
         _bestCandidate = snapshot.Result.Decision.Target;
@@ -437,7 +492,9 @@ internal sealed partial class MainForm
             : $"{ModeDisplayName()}→{effectiveMode}";
         _candidateLabel.Text = _bestCandidate is null
             ? $"{ModeDisplayName()}：无符合项"
-            : $"{ModeDisplayName()}：{_bestCandidate.Provider.PlanType}  {_bestCandidate.EffectiveMultiplier:0.####}x";
+            : _forcedGroupId == _bestCandidate.Group.Id
+                ? $"强制：{_bestCandidate.Provider.PlanType}  {_bestCandidate.EffectiveMultiplier:0.####}x"
+                : $"{ModeDisplayName()}：{_bestCandidate.Provider.PlanType}  {_bestCandidate.EffectiveMultiplier:0.####}x";
         _candidateLabel.Text = _candidateLabel.Text.Replace(
             ModeDisplayName(),
             modeText,
@@ -459,6 +516,10 @@ internal sealed partial class MainForm
         var candidateLookup = _lastEvaluation?.EligibleCandidates.ToDictionary(
             candidate => candidate.Provider.Id,
             StringComparer.Ordinal) ?? new Dictionary<string, RouteCandidate>(StringComparer.Ordinal);
+        var eligibleGroupIds = _lastEvaluation?.EligibleCandidates
+            .Select(candidate => candidate.Group.Id)
+            .ToHashSet() ?? [];
+        var hasAccountData = _hasAuthenticatedAccountData && HasCredentials();
         var rows = _summary.Apis
             .Where(provider => provider.Platform.Equals(criteria.Platform, StringComparison.OrdinalIgnoreCase))
             .Select(provider =>
@@ -466,7 +527,7 @@ internal sealed partial class MainForm
                 var group = provider.GroupId is { } groupId && groups.TryGetValue(groupId, out var foundGroup)
                     ? foundGroup
                     : null;
-                var isAuthorized = group is not null;
+                var isAuthorized = IsActiveGroupForPlatform(group, criteria.Platform);
                 var blockReason = (criteria.Blocklist ?? ProviderBlocklist.Empty).GetBlockingReason(provider, group);
                 var isBlocked = blockReason != ProviderBlockReason.None;
                 var overrideRate = 0d;
@@ -485,17 +546,22 @@ internal sealed partial class MainForm
                     out candidateScore);
                 var score = hasScore ? candidateScore.ToString("0.###") : "-";
                 var scoreValue = hasScore ? candidateScore : double.NegativeInfinity;
-                var isRoutable = !isBlocked && ProviderStatusPresentation.IsRoutable(
+                var isRoutable = hasAccountData && !isBlocked &&
+                    provider.GroupId is { } eligibleGroupId &&
+                    eligibleGroupIds.Contains(eligibleGroupId);
+                var isForcedGroup = provider.GroupId is { } forcedGroupId && forcedGroupId == _forcedGroupId;
+                if (isForcedGroup)
+                {
+                    adaptiveRank = "固定";
+                    adaptiveRankValue = 0;
+                }
+                var displayProvider = RoutingEngine.ResolveActiveProbeMetrics(
                     provider,
-                    hasAccountData: _groups.Count > 0,
-                    isAuthorized,
-                    effectiveRate,
-                    criteria.MinimumSuccessRate6h,
                     now,
-                    criteria.MaximumStatusAge);
+                    criteria.ActiveProbeMaximumAge);
                 return new ProviderGridRow
                 {
-                    Source = provider,
+                    Source = displayProvider,
                     IsRoutable = isRoutable,
                     IsBest = !isBlocked && _bestCandidate?.Provider.Id == provider.Id,
                     IsBlocked = isBlocked,
@@ -504,20 +570,29 @@ internal sealed partial class MainForm
                     WeightedScoreValue = scoreValue,
                     AdaptiveRank = adaptiveRank,
                     AdaptiveRankValue = adaptiveRankValue,
-                    DecisionState = hasCandidate && provider.GroupId is { } recommendedGroupId &&
-                        recommendedGroupId == _lastEvaluation?.Recommended?.Group.Id ? "推荐"
+                    DecisionState = isForcedGroup
+                        ? provider.GroupId is { } forcedId && eligibleGroupIds.Contains(forcedId) && !isBlocked
+                            ? "强制"
+                            : "强制失效"
+                        : hasCandidate && provider.GroupId is { } recommendedGroupId &&
+                            recommendedGroupId == _lastEvaluation?.Recommended?.Group.Id ? "推荐"
                         : hasCandidate && provider.GroupId is { } baselineGroupId &&
                             baselineGroupId == _lastEvaluation?.Baseline?.Group.Id ? "最低价"
                         : string.Empty,
                     BlockStatus = BlockReasonText(blockReason),
+                    UsesActiveProbeLatency = RoutingEngine.UsesFreshActiveProbeLatency(
+                        provider,
+                        now,
+                        criteria.ActiveProbeMaximumAge),
                     State = isBlocked ? "已拉黑" : ProviderStatusPresentation.ResolveRoutingState(
                         provider,
-                        hasAccountData: _groups.Count > 0,
+                        hasAccountData,
                         isAuthorized: isAuthorized,
                         effectiveMultiplier: effectiveRate,
                         minimumSuccessRate6h: criteria.MinimumSuccessRate6h,
                         now: now,
-                        maximumStatusAge: criteria.MaximumStatusAge)
+                        maximumStatusAge: criteria.MaximumStatusAge,
+                        activeProbeMaximumAge: criteria.ActiveProbeMaximumAge)
                 };
             })
             .OrderByDescending(row => row.IsRoutable)
@@ -525,17 +600,27 @@ internal sealed partial class MainForm
             .ThenBy(row => row.AdaptiveRankValue)
             .ThenByDescending(row => row.IsBest)
             .ThenBy(row => row.Source.PriceMultiplier)
-            .ThenByDescending(row => row.Source.SuccessRate6h ?? 0)
+            .ThenByDescending(row => RoutingEngine.NormalizeSuccessRate(row.Source.SuccessRate6h))
             .ToList();
 
         _providerGrid.DataSource = new BindingList<ProviderGridRow>(rows);
     }
 
+    private static bool IsActiveGroupForPlatform(GroupInfo? group, string platform) =>
+        group is not null &&
+        group.Status.Equals("active", StringComparison.OrdinalIgnoreCase) &&
+        group.Platform.Equals(platform, StringComparison.OrdinalIgnoreCase);
+
     private void ApplyKeys(IReadOnlyList<ApiKeyInfo> keys)
     {
+        _keys = keys;
         var selectedIds = _hasLoadedKeys && _keySelectionInitialized
             ? CurrentKeyRows().Where(row => row.Selected).Select(row => row.Id).ToHashSet()
             : KeySelectionPolicy.Resolve(_keySelectionInitialized, _savedSelectedKeyIds, keys).ToHashSet();
+        if (_activeProbeCheck.Checked && _activeProbeKeyId is { } activeProbeKeyId)
+        {
+            selectedIds.Remove(activeProbeKeyId);
+        }
         var groupLookup = _groups.ToDictionary(group => group.Id);
 
         _applyingKeys = true;
@@ -550,6 +635,8 @@ internal sealed partial class MainForm
                     Id = key.Id,
                     Name = key.Name,
                     Status = key.Status,
+                    Purpose = IsActiveProbeKey(key.Id) ? "健康检查" : "路由",
+                    IsProbeKey = IsActiveProbeKey(key.Id),
                     GroupId = key.GroupId,
                     GroupName = group?.Name ?? "未绑定",
                     Platform = group?.Platform ?? "-"
@@ -568,7 +655,10 @@ internal sealed partial class MainForm
             _applyingKeys = false;
         }
 
-        if (_persistCredentialsCheck.Checked)
+        if (RoutingPersistencePolicy.ShouldPersistCredentials(
+                _persistCredentialsCheck.Checked,
+                _applyingRoutingSettings,
+                _suppressRoutingPersistence))
         {
             SaveCurrentSettings(showStatus: false);
         }
@@ -588,6 +678,23 @@ internal sealed partial class MainForm
     {
         if (_applyingKeys || eventArgs.RowIndex < 0 || eventArgs.ColumnIndex != 0)
         {
+            return;
+        }
+
+        if (_keyGrid.Rows[eventArgs.RowIndex].DataBoundItem is KeyGridRow { IsProbeKey: true } probeKey)
+        {
+            _applyingKeys = true;
+            try
+            {
+                probeKey.Selected = false;
+                _keyGrid.Refresh();
+            }
+            finally
+            {
+                _applyingKeys = false;
+            }
+
+            SetStatus("健康检查 Key 已从普通路由中排除。", success: true);
             return;
         }
 

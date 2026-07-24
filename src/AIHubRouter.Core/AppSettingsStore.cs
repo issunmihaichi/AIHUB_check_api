@@ -7,15 +7,24 @@ namespace AIHubRouter.Core;
 
 public sealed class PersistentAppSettings
 {
+    private const int DefaultActiveProbeIntervalSeconds = 90;
+    private static readonly TimeSpan MaximumActiveProbeAge = TimeSpan.FromMinutes(30);
+
     public bool PersistCredentials { get; init; }
     public string BaseUrl { get; init; } = "https://aihub.top";
     public string Platform { get; init; } = "openai";
     public RoutingMode RoutingMode { get; init; } = RoutingMode.Economy;
-    public TaskDurationCategory DurationCategory { get; init; } = TaskDurationCategory.Medium;
-    public double BalancedCountdownSeconds { get; init; } = 7_200;
-    public DateTimeOffset? BalancedCountdownEndsAtUtc { get; init; }
+    private TaskDurationCategory _durationCategory = TaskDurationCategory.Medium;
+    public TaskDurationCategory DurationCategory
+    {
+        get => _durationCategory;
+        init => _durationCategory = value is TaskDurationCategory.Short or
+            TaskDurationCategory.Medium or TaskDurationCategory.Long
+            ? value
+            : TaskDurationCategory.Medium;
+    }
     public double BalancedDeadlineSoftSeconds { get; init; } = BalancedDeadlineEngine.DefaultSoftDeadlineSeconds;
-    public double BalancedExpectedOutputTokens { get; init; } = 1_000;
+    public double BalancedExpectedOutputTokens { get; init; } = BalancedDeadlineEngine.DefaultExpectedOutputTokens;
     public int MinimumSuccessPercent { get; init; }
     public int PollingIntervalSeconds { get; init; } = 60;
     public int AccountCacheSeconds { get; init; } = 300;
@@ -25,6 +34,10 @@ public sealed class PersistentAppSettings
     public long[] SelectedKeyIds { get; init; } = [];
     public long[] BlockedGroupIds { get; init; } = [];
     public string[] BlockedNodePatterns { get; init; } = [];
+    public bool ActiveProbeEnabled { get; init; }
+    public long? ActiveProbeKeyId { get; init; }
+    public string ActiveProbeModel { get; init; } = string.Empty;
+    public int ActiveProbeIntervalSeconds { get; init; } = 90;
 
     public BalancedRoutingPolicy CreatePolicy()
     {
@@ -33,9 +46,28 @@ public sealed class PersistentAppSettings
             Platform = string.IsNullOrWhiteSpace(Platform) ? "openai" : Platform,
             Mode = RoutingMode,
             MinimumSuccessRate6h = Math.Clamp(MinimumSuccessPercent, 0, 100) / 100d,
-            MaximumStatusAge = TimeSpan.FromMinutes(15),
+            MaximumStatusAge = RoutingEngine.DefaultMaximumStatusAge,
+            ActiveProbeMaximumAge = ResolveActiveProbeMaximumAge(
+                ActiveProbeEnabled,
+                ActiveProbeIntervalSeconds),
             Blocklist = new ProviderBlocklist(BlockedGroupIds, BlockedNodePatterns)
         };
+    }
+
+    public static TimeSpan? ResolveActiveProbeMaximumAge(bool enabled, int intervalSeconds)
+    {
+        if (!enabled)
+        {
+            return null;
+        }
+
+        var normalizedInterval = intervalSeconds > 0
+            ? intervalSeconds
+            : DefaultActiveProbeIntervalSeconds;
+        var ageSeconds = Math.Min(
+            MaximumActiveProbeAge.TotalSeconds,
+            2d * normalizedInterval);
+        return TimeSpan.FromSeconds(ageSeconds);
     }
 }
 
@@ -48,6 +80,7 @@ public sealed class PersistentCredentials
     public DateTimeOffset? AccessTokenExpiresAt { get; init; }
     public string Cookie { get; init; } = string.Empty;
     public string UserAgent { get; init; } = string.Empty;
+    public string ActiveProbeApiKey { get; init; } = string.Empty;
 }
 
 public sealed record PersistenceSnapshot(

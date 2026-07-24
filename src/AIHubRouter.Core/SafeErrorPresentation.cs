@@ -12,6 +12,8 @@ public static class SafeErrorPresentation
         {
             InteractiveAuthenticationRequiredException =>
                 "当前账号需要验证码或两步验证，请先在 AIHub 网页完成登录验证。",
+            ActiveProbeRestoreException =>
+                "测速专用 Key 未能恢复原分组，已停止自动测速。请确认 AIHub 控制台中的 Key 分组后重试。",
             AIHubApiException apiException => GetApiMessage(apiException),
             HttpRequestException => "网络连接失败，请检查站点地址和网络。",
             TaskCanceledException => "请求超时，请稍后重试。",
@@ -23,6 +25,14 @@ public static class SafeErrorPresentation
 
     private static string GetApiMessage(AIHubApiException exception)
     {
+        if (exception.StatusCode is { } successfulStatus &&
+            (int)successfulStatus is >= 200 and <= 299)
+        {
+            return exception.IsAuthenticationRequest
+                ? "认证响应表示失败或格式不兼容，请重新验证登录信息。"
+                : "AIHub 返回了业务错误或无法识别的响应格式，请稍后重试。";
+        }
+
         if (exception.IsAuthenticationRequest)
         {
             return exception.StatusCode switch

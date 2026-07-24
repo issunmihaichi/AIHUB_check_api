@@ -25,6 +25,7 @@ public static class RouteDecisionCoordinator
         ArgumentNullException.ThrowIfNull(basePolicy);
         ArgumentNullException.ThrowIfNull(state);
         basePolicy.Validate();
+        _ = balancedRemainingSeconds; // Legacy positional slot; countdown no longer affects routing.
 
         var currentGroupId = observedCurrentGroupId ?? state.CurrentGroupId;
         var currentInterval = currentGroupId is null
@@ -38,8 +39,7 @@ public static class RouteDecisionCoordinator
         var effectivePreference = basePolicy.Mode switch
         {
             RoutingMode.Economy => AdaptivePreference.Cost,
-            RoutingMode.Balanced when balancedRemainingSeconds is { } remaining =>
-                remaining <= 0 ? AdaptivePreference.Cost : AdaptivePreference.Balanced,
+            RoutingMode.Balanced => AdaptivePreference.Balanced,
             _ => AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(
                 currentInterval,
                 basePreference)
@@ -62,7 +62,7 @@ public static class RouteDecisionCoordinator
                 basePolicy.Mode,
                 durationCategory,
                 currentInterval,
-                balancedRemainingSeconds,
+                BalancedRemainingSeconds: null,
                 balancedDeadlineSoftSeconds,
                 balancedExpectedOutputTokens),
             now,

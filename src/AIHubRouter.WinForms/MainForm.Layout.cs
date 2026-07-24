@@ -27,20 +27,11 @@ internal sealed partial class MainForm
     private readonly Button _refreshButton = new() { Text = "刷新数据", AutoSize = true };
     private readonly Button _simulateButton = new() { Text = "模拟", AutoSize = true };
     private readonly Button _routeNowButton = new() { Text = "立即路由", AutoSize = true };
-    private readonly Button _manageBlocklistButton = new() { Text = "黑名单...", AutoSize = true };
+    private readonly Button _routingSettingsButton = new() { Text = "设置...", AutoSize = true };
+    private readonly CheckBox _activeProbeCheck = new() { Text = "每 90 秒检查", AutoSize = true };
+    private readonly Button _cancelActiveProbeButton = new() { Text = "取消检查", AutoSize = true, Visible = false, Enabled = false };
     private readonly ComboBox _platformCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 110 };
     private readonly ComboBox _routingModeCombo = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 92 };
-    private readonly NumericUpDown _balancedCountdownInput = new()
-    {
-        Minimum = 0,
-        Maximum = 1440,
-        Increment = 1,
-        DecimalPlaces = 1,
-        Value = 120,
-        Width = 82
-    };
-    private readonly Button _resetBalancedCountdownButton = new() { Text = "重置", AutoSize = true };
-    private readonly Label _balancedCountdownLabel = new() { AutoSize = true, Text = "剩余 --" };
     private readonly NumericUpDown _balancedSoftDeadlineInput = new()
     {
         Minimum = 0,
@@ -56,7 +47,7 @@ internal sealed partial class MainForm
         Maximum = 10_000_000,
         Increment = 100,
         DecimalPlaces = 0,
-        Value = 1_000,
+        Value = (decimal)BalancedDeadlineEngine.DefaultExpectedOutputTokens,
         ThousandsSeparator = true,
         Width = 92
     };
@@ -90,7 +81,10 @@ internal sealed partial class MainForm
     private readonly BufferedDataGridView _providerGrid = CreateGrid();
     private readonly BufferedDataGridView _keyGrid = CreateGrid();
     private readonly ContextMenuStrip _providerContextMenu = new();
+    private readonly ToolStripMenuItem _forceGroupMenuItem = new();
     private readonly ToolStripMenuItem _toggleGroupBlocklistMenuItem = new();
+    private readonly ContextMenuStrip _keyContextMenu = new();
+    private readonly ToolStripMenuItem _setActiveProbeKeyMenuItem = new();
     private readonly ToolTip _toolTip = new() { AutoPopDelay = 12000, InitialDelay = 350, ReshowDelay = 100 };
     private readonly StatusStrip _statusStrip = new();
     private readonly ToolStripStatusLabel _statusLabel = new() { Spring = true, TextAlign = ContentAlignment.MiddleLeft };
@@ -109,8 +103,8 @@ internal sealed partial class MainForm
         SuspendLayout();
         Text = "AIHub 最低价路由器";
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(1050, 880);
-        ClientSize = new Size(1220, 950);
+        MinimumSize = new Size(1050, 720);
+        ClientSize = new Size(1220, 820);
         Font = new Font("Segoe UI", 9F, FontStyle.Regular, GraphicsUnit.Point);
         BackColor = Color.FromArgb(245, 247, 249);
         DoubleBuffered = true;
@@ -132,7 +126,7 @@ internal sealed partial class MainForm
             BackColor = BackColor
         };
         root.RowStyles.Add(_credentialPanelRowStyle);
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 94));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         root.Controls.Add(BuildCredentialPanel(), 0, 0);
@@ -274,46 +268,25 @@ internal sealed partial class MainForm
 
     private Control BuildRoutingToolbar()
     {
-        var panel = new FlowLayoutPanel
+        var commands = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = true,
-            Padding = new Padding(4, 12, 4, 8),
+            WrapContents = false,
+            Padding = new Padding(4, 10, 4, 6),
             BackColor = BackColor
         };
 
-        panel.Controls.Add(CreateToolbarLabel("平台"));
-        panel.Controls.Add(_platformCombo);
-        panel.Controls.Add(CreateToolbarLabel("最低 6h 可用率"));
-        panel.Controls.Add(_minimumSuccessInput);
-        panel.Controls.Add(CreateToolbarLabel("%"));
-        panel.Controls.Add(CreateToolbarLabel("轮询间隔"));
-        panel.Controls.Add(_intervalInput);
-        panel.Controls.Add(CreateToolbarLabel("秒"));
-        panel.Controls.Add(CreateToolbarLabel("账户缓存"));
-        panel.Controls.Add(_accountCacheInput);
-        panel.Controls.Add(CreateToolbarLabel("秒"));
-        panel.Controls.Add(_autoRouteCheck);
-        panel.Controls.Add(_verticalSyncCheck);
-        panel.Controls.Add(CreateToolbarLabel("模式"));
-        panel.Controls.Add(_routingModeCombo);
-        panel.Controls.Add(CreateToolbarLabel("均衡倒计时"));
-        panel.Controls.Add(_balancedCountdownInput);
-        panel.Controls.Add(CreateToolbarLabel("分钟"));
-        panel.Controls.Add(_resetBalancedCountdownButton);
-        panel.Controls.Add(_balancedCountdownLabel);
-        panel.Controls.Add(CreateToolbarLabel("软截止 + 秒"));
-        panel.Controls.Add(_balancedSoftDeadlineInput);
-        panel.Controls.Add(CreateToolbarLabel("预计输出 Token"));
-        panel.Controls.Add(_balancedExpectedOutputInput);
-        panel.Controls.Add(CreateToolbarLabel("主题"));
-        panel.Controls.Add(_themeCombo);
-        panel.Controls.Add(_manageBlocklistButton);
-        panel.Controls.Add(_refreshButton);
-        panel.Controls.Add(_simulateButton);
-        panel.Controls.Add(_routeNowButton);
-        return panel;
+        commands.Controls.Add(CreateToolbarLabel("平台"));
+        commands.Controls.Add(_platformCombo);
+        commands.Controls.Add(CreateToolbarLabel("模式"));
+        commands.Controls.Add(_routingModeCombo);
+        commands.Controls.Add(_refreshButton);
+        commands.Controls.Add(_simulateButton);
+        commands.Controls.Add(_routeNowButton);
+        commands.Controls.Add(_cancelActiveProbeButton);
+        commands.Controls.Add(_routingSettingsButton);
+        return commands;
     }
 
     private Control BuildDataArea()
@@ -371,8 +344,11 @@ internal sealed partial class MainForm
 
     private void ConfigureProviderGrid()
     {
+        _providerContextMenu.Items.Add(_forceGroupMenuItem);
+        _providerContextMenu.Items.Add(new ToolStripSeparator());
         _providerContextMenu.Items.Add(_toggleGroupBlocklistMenuItem);
         _providerContextMenu.Opening += HandleProviderContextMenuOpening;
+        _forceGroupMenuItem.Click += async (_, _) => await ToggleForcedGroupAsync();
         _toggleGroupBlocklistMenuItem.Click += (_, _) => ToggleCurrentGroupBlocklist();
         _providerGrid.ContextMenuStrip = _providerContextMenu;
         _providerGrid.MouseDown += HandleProviderGridMouseDown;
@@ -389,6 +365,7 @@ internal sealed partial class MainForm
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "状态", DataPropertyName = "State", Width = 105 });
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "6h 可用率", DataPropertyName = "Success6h", Width = 92 });
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "首 Token", DataPropertyName = "FirstToken", Width = 88 });
+        _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "首字来源", DataPropertyName = "FirstTokenSource", Width = 128 });
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "检测时间", DataPropertyName = "CheckedAt", Width = 118 });
         _providerGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "黑名单", DataPropertyName = "BlockStatus", Width = 90 });
         _providerGrid.CellFormatting += (_, eventArgs) =>
@@ -403,10 +380,17 @@ internal sealed partial class MainForm
 
     private void ConfigureKeyGrid()
     {
+        _keyContextMenu.Items.Add(_setActiveProbeKeyMenuItem);
+        _keyContextMenu.Opening += HandleKeyContextMenuOpening;
+        _setActiveProbeKeyMenuItem.Click += (_, _) => SetCurrentKeyAsActiveProbeKey();
+        _keyGrid.ContextMenuStrip = _keyContextMenu;
+        _keyGrid.MouseDown += HandleKeyGridMouseDown;
+        _keyGrid.CellMouseDown += HandleKeyGridCellMouseDown;
         _keyGrid.Columns.Add(new DataGridViewCheckBoxColumn { HeaderText = "路由", DataPropertyName = "Selected", Width = 58 });
         _keyGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "ID", DataPropertyName = "Id", Width = 68, ReadOnly = true });
         _keyGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "名称", DataPropertyName = "Name", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = 180, ReadOnly = true });
         _keyGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "状态", DataPropertyName = "Status", Width = 100, ReadOnly = true });
+        _keyGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "用途", DataPropertyName = "Purpose", Width = 92, ReadOnly = true });
         _keyGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "分组 ID", DataPropertyName = "GroupId", Width = 80, ReadOnly = true });
         _keyGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "当前分组", DataPropertyName = "GroupName", Width = 220, ReadOnly = true });
         _keyGrid.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "平台", DataPropertyName = "Platform", Width = 100, ReadOnly = true });
@@ -485,15 +469,15 @@ internal sealed partial class MainForm
         _toolTip.SetToolTip(_verticalSyncCheck, "Windows 桌面由 DWM 合成；此开关控制窗口和表格双缓冲，减少刷新与滚动闪烁。");
         _toolTip.SetToolTip(_authGuideButton, "打开完整认证步骤和可复制的浏览器命令。");
         _toolTip.SetToolTip(_persistCredentialsCheck, "勾选后，账号、session、Cookie 和 UA 会通过 Windows DPAPI 加密保存到当前用户目录。");
+        _toolTip.SetToolTip(_routingSettingsButton, "打开分页设置；取消不会应用任何修改。");
+        _toolTip.SetToolTip(_activeProbeCheck, "每 90 秒只检查指定 Key 当前所在分组是否存活。不会切换分组或影响节点指标；启用后该 Key 不参与普通自动路由。");
+        _toolTip.SetToolTip(_cancelActiveProbeButton, "停止本轮 Key 健康检查。");
         _toolTip.SetToolTip(_saveSettingsButton, "立即保存连接、认证、Key 勾选和路由界面配置。");
         _toolTip.SetToolTip(_providerGrid, "拖动列分隔线时调整右侧列：向左扩宽右侧列，向右缩窄右侧列。");
         _toolTip.SetToolTip(_keyGrid, "拖动列分隔线时调整右侧列：向左扩宽右侧列，向右缩窄右侧列。");
         _toolTip.SetToolTip(_routingModeCombo, "经济优先价格；均衡权衡价格和首 token 延迟；速度优先低延迟。");
-        _toolTip.SetToolTip(_balancedCountdownInput, "均衡模式的任务倒计时。倒计时归零后自动使用经济模式；修改数值会重新开始倒计时。输入 0 可立即使用经济模式。");
-        _toolTip.SetToolTip(_resetBalancedCountdownButton, "按当前分钟数重新开始均衡倒计时。");
-        _toolTip.SetToolTip(_balancedCountdownLabel, "均衡模式剩余时间；同时用于估算本轮输出量。");
         _toolTip.SetToolTip(_balancedSoftDeadlineInput, "均衡模式的用户容忍度：在当前节点超出 26.73 秒硬截止后，允许候选节点最多额外慢多少秒。数值越大越偏向省钱。");
-        _toolTip.SetToolTip(_balancedExpectedOutputInput, "本轮请求预计生成的输出 Token 数，只用于均衡 Deadline 计算，与任务倒计时相互独立。");
+        _toolTip.SetToolTip(_balancedExpectedOutputInput, "本轮请求预计生成的输出 Token 数，只用于均衡 Deadline 计算。");
         _toolTip.SetToolTip(_simulateButton, "只计算并展示决策，不会修改任何 API Key。");
         _toolTip.SetToolTip(_themeCombo, "跟随 Windows 个性化设置，或固定浅色/深色 WinForms 调色板。");
         _toolTip.SetToolTip(_accountCacheInput, "账户分组、倍率和 Key 列表在此时间内复用；监控数据每次刷新。");

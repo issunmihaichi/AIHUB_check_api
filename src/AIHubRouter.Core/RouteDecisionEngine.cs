@@ -40,8 +40,7 @@ public static class RouteDecisionEngine
         var effectivePreference = context.BaseMode switch
         {
             RoutingMode.Economy => AdaptivePreference.Cost,
-            RoutingMode.Balanced when context.BalancedRemainingSeconds is { } balancedRemaining =>
-                balancedRemaining <= 0 ? AdaptivePreference.Cost : AdaptivePreference.Balanced,
+            RoutingMode.Balanced => AdaptivePreference.Balanced,
             _ => AdaptiveSwitchDecisionEngine.ResolveEffectivePreference(
                 context.CurrentIntervalSeconds,
                 basePreference)
@@ -49,6 +48,26 @@ public static class RouteDecisionEngine
         var currentGroupId = observedCurrentGroupId ?? state.CurrentGroupId;
         var current = evaluation.EligibleCandidates.FirstOrDefault(
             candidate => candidate.Group.Id == currentGroupId);
+        var forcedTarget = state.ForcedGroupId is { } forcedGroupId
+            ? evaluation.EligibleCandidates.FirstOrDefault(candidate => candidate.Group.Id == forcedGroupId)
+            : null;
+        if (state.ForcedGroupId is not null && forcedTarget is null)
+        {
+            state = state.ReleaseForcedGroup();
+        }
+
+        if (forcedTarget is not null)
+        {
+            return DecideForcedGroup(
+                evaluation,
+                state,
+                context,
+                effectivePreference,
+                current,
+                forcedTarget,
+                now);
+        }
+
         var target = effectivePreference == AdaptivePreference.Cost
             ? SelectStrictCheapest(evaluation.EligibleCandidates)
             : evaluation.Recommended;
@@ -75,24 +94,12 @@ public static class RouteDecisionEngine
                 "Current route is no longer eligible; recovered immediately.");
         }
 
-        if (context.BaseMode == RoutingMode.Balanced &&
-            context.BalancedRemainingSeconds is { } remainingSeconds)
+        if (context.BaseMode == RoutingMode.Balanced)
         {
-            if (remainingSeconds <= 0)
-            {
-                return DecideBalancedCountdownExpired(
-                    evaluation,
-                    current,
-                    target,
-                    state,
-                    context,
-                    now);
-            }
-
             var deadlineDecision = BalancedDeadlineEngine.Decide(new BalancedDeadlineRequest(
                 current,
                 evaluation.EligibleCandidates,
-                context.BalancedExpectedOutputTokens ?? 0,
+                context.BalancedExpectedOutputTokens ?? BalancedDeadlineEngine.DefaultExpectedOutputTokens,
                 context.CurrentIntervalSeconds,
                 DeadlineSoftSeconds: context.BalancedDeadlineSoftSeconds ??
                     BalancedDeadlineEngine.DefaultSoftDeadlineSeconds));
@@ -211,6 +218,51 @@ public static class RouteDecisionEngine
             rankings);
     }
 
+    private static RouteDecisionResult DecideForcedGroup(
+        RouteEvaluation evaluation,
+        RouteState state,
+        AdaptiveRoutingContext context,
+        AdaptivePreference effectivePreference,
+        RouteCandidate? current,
+        RouteCandidate target,
+        DateTimeOffset now)
+    {
+        var premium = CalculatePremium(evaluation.MinimumMultiplier, target.EffectiveMultiplier);
+        var same = current is not null && current.Group.Id == target.Group.Id;
+        var result = same
+            ? Result(
+                current,
+                target,
+                false,
+                RouteDecisionReason.ForcedGroupSelected,
+                state with
+                {
+                    CurrentGroupId = target.Group.Id,
+                    PendingPolicyTargetGroupId = null,
+                    PendingPolicyTargetObservations = 0
+                },
+                premium,
+                0,
+                now)
+            : Switched(
+                current,
+                target,
+                RouteDecisionReason.ForcedGroupSelected,
+                state,
+                premium,
+                CalculateLatencyImprovement(
+                    current?.Provider.FirstTokenLatencyMs,
+                    target.Provider.FirstTokenLatencyMs),
+                now,
+                RouteSwitchClass.ManualOverride);
+        return Enrich(
+            result,
+            context,
+            effectivePreference,
+            adaptiveDecision: null,
+            "The user-forced group overrides routing policy until it becomes unavailable.");
+    }
+
     private static RouteDecisionResult DecideStrictEconomy(
         RouteEvaluation evaluation,
         RouteState state,
@@ -241,33 +293,6 @@ public static class RouteDecisionEngine
         }
 
         return ApplyPolicyHysteresis(enriched, state, current, now);
-    }
-
-    private static RouteDecisionResult DecideBalancedCountdownExpired(
-        RouteEvaluation evaluation,
-        RouteCandidate? current,
-        RouteCandidate target,
-        RouteState state,
-        AdaptiveRoutingContext context,
-        DateTimeOffset now)
-    {
-        var same = current is not null && current.Group.Id == target.Group.Id;
-        var premium = CalculatePremium(evaluation.MinimumMultiplier, target.EffectiveMultiplier);
-        var result = same
-            ? Result(current, current, false, RouteDecisionReason.BalancedCountdownExpired,
-                ObservePolicyEvaluation(state, current!.Group.Id, null), premium, 0, now)
-            : Switched(current, target, RouteDecisionReason.BalancedCountdownExpired,
-                state, premium, CalculateLatencyImprovement(
-                    current?.Provider.FirstTokenLatencyMs,
-                    target.Provider.FirstTokenLatencyMs), now,
-                current is null ? RouteSwitchClass.Initial : RouteSwitchClass.Policy);
-        var enriched = Enrich(
-            result,
-            context,
-            AdaptivePreference.Cost,
-            adaptiveDecision: null,
-            "Balanced countdown expired; Economy selected the strict lowest-cost route.");
-        return same || current is null ? enriched : ApplyPolicyHysteresis(enriched, state, current, now);
     }
 
     private static RouteDecisionResult ApplyBalancedDeadlineDecision(
@@ -303,13 +328,16 @@ public static class RouteDecisionEngine
                     ? state with { CurrentGroupId = target.Group.Id }
                     : ObservePolicyEvaluation(state, current.Group.Id, null),
                 premium, 0, now);
-        return Enrich(
+        var enriched = Enrich(
             result,
             context,
             effectivePreference,
             adaptiveDecision: null,
             deadlineDecision.Detail,
             deadlineDecision: deadlineDecision);
+        return current is null
+            ? enriched
+            : ApplyPolicyHysteresis(enriched, state, current, now);
     }
 
     private static RouteDecisionResult Enrich(
@@ -353,7 +381,7 @@ public static class RouteDecisionEngine
     private static RouteCandidate? SelectStrictCheapest(IEnumerable<RouteCandidate> candidates) =>
         candidates
             .OrderBy(candidate => candidate.EffectiveMultiplier)
-            .ThenByDescending(candidate => candidate.Provider.SuccessRate6h ?? 0)
+            .ThenByDescending(candidate => RoutingEngine.NormalizeSuccessRate(candidate.Provider.SuccessRate6h))
             .ThenBy(candidate => RoutingEngine.NormalizeLatency(candidate.Provider.FirstTokenLatencyMs))
             .ThenBy(candidate => candidate.Group.Id)
             .FirstOrDefault();
@@ -548,7 +576,8 @@ public static class RouteDecisionEngine
         long targetGroupId,
         DateTimeOffset now,
         RouteSwitchClass switchClass) =>
-        switchClass is RouteSwitchClass.Policy or RouteSwitchClass.ForcedRecovery
+        switchClass is RouteSwitchClass.Initial or RouteSwitchClass.Policy or
+            RouteSwitchClass.ForcedRecovery or RouteSwitchClass.ManualOverride
             ? state with
             {
                 CurrentGroupId = targetGroupId,
