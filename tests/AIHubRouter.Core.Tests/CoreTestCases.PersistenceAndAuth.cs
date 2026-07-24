@@ -442,6 +442,189 @@ internal static partial class CoreTestCases
         Assert(session.RefreshToken == "refresh-current", "Refresh discarded the existing token when no rotation was returned.");
     }
 
+    internal static void TestHttp200SuccessEnvelopesDeserialize()
+    {
+        var cases = new (string Name, string Json, string ExpectedProviderId)[]
+        {
+            ("numeric zero data", """{"code":0,"data":{"apis":[{"id":"zero-data"}]}}""", "zero-data"),
+            ("2xx result", """{"code":204,"result":{"apis":[{"id":"two-hundred-result"}]}}""", "two-hundred-result"),
+            ("OK payload", """{"code":"OK","payload":{"apis":[{"id":"ok-payload"}]}}""", "ok-payload"),
+            ("SUCCESS data", """{"code":"SUCCESS","data":{"apis":[{"id":"success-data"}]}}""", "success-data"),
+            ("boolean success result", """{"success":true,"result":{"apis":[{"id":"boolean-result"}]}}""", "boolean-result"),
+            ("status success payload", """{"status":"success","payload":{"apis":[{"id":"status-payload"}]}}""", "status-payload")
+        };
+
+        foreach (var item in cases)
+        {
+            var handler = new StubHttpMessageHandler(_ => JsonResponse(item.Json));
+            using var client = new AIHubClient("https://example.test", messageHandler: handler);
+
+            var summary = client.GetProviderSummaryAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+            Assert(summary.Apis.Count == 1 && summary.Apis[0].Id == item.ExpectedProviderId,
+                $"HTTP 200 {item.Name} envelope was not unwrapped.");
+        }
+    }
+
+    internal static void TestHttp200DirectBusinessResponsesDeserialize()
+    {
+        var monitorHandler = new StubHttpMessageHandler(_ => JsonResponse("""
+            {"apis":[{"id":"direct-monitor"}]}
+            """));
+        using var monitorClient = new AIHubClient("https://example.test", messageHandler: monitorHandler);
+        var summary = monitorClient.GetProviderSummaryAsync(CancellationToken.None).GetAwaiter().GetResult();
+        Assert(summary.Apis.Count == 1 && summary.Apis[0].Id == "direct-monitor",
+            "Direct MonitorSummary response was not deserialized.");
+
+        var groupHandler = new StubHttpMessageHandler(_ => JsonResponse("""
+            [{"id":7,"name":"direct-group","status":"active"}]
+            """));
+        using var groupClient = new AIHubClient("https://example.test", messageHandler: groupHandler);
+        var groups = groupClient.GetAvailableGroupsAsync(CancellationToken.None).GetAwaiter().GetResult();
+        Assert(groups.Count == 1 && groups[0].Status == "active",
+            "Direct GroupInfo status was mistaken for an API response envelope.");
+
+        var keyHandler = new StubHttpMessageHandler(_ => JsonResponse("""
+            {"id":18,"name":"direct-key","group_id":7,"status":"active","group":{"id":7,"name":"direct-group","status":"active"}}
+            """));
+        using var keyClient = new AIHubClient("https://example.test", messageHandler: keyHandler);
+        var key = keyClient.UpdateKeyGroupAsync(18, 7, CancellationToken.None).GetAwaiter().GetResult();
+        Assert(key.Status == "active" && key.Group?.Status == "active",
+            "Direct business status was mistaken for an API response envelope.");
+
+        var failureLikeStatusHandler = new StubHttpMessageHandler(_ => JsonResponse("""
+            {"id":19,"name":"direct-failure-like-status","group_id":7,"status":"UPSTREAM_FAILED"}
+            """));
+        using var failureLikeStatusClient = new AIHubClient(
+            "https://example.test",
+            messageHandler: failureLikeStatusHandler);
+        var failureLikeStatusKey = failureLikeStatusClient
+            .UpdateKeyGroupAsync(19, 7, CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        Assert(failureLikeStatusKey.Status == "UPSTREAM_FAILED",
+            "A lone direct business status was treated as envelope metadata.");
+
+        var nullableErrorHandler = new StubHttpMessageHandler(_ => JsonResponse("""
+            {"id":20,"name":"direct-nullable-error","group_id":7,"status":"active","error":null}
+            """));
+        using var nullableErrorClient = new AIHubClient("https://example.test", messageHandler: nullableErrorHandler);
+        var nullableErrorKey = nullableErrorClient
+            .UpdateKeyGroupAsync(20, 7, CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        Assert(nullableErrorKey.Status == "active",
+            "A null direct error field was treated as an API response envelope.");
+    }
+
+    internal static void TestHttp200DirectJsonElementValidationResponseRemainsUsable()
+    {
+        var handler = new StubHttpMessageHandler(_ => JsonResponse("""
+            {"id":"account-1","status":"active"}
+            """));
+        using var client = new AIHubClient("https://example.test", messageHandler: handler);
+
+        var response = client.ValidateLoginAsync(CancellationToken.None).GetAwaiter().GetResult();
+
+        Assert(response.ValueKind == JsonValueKind.Object &&
+               response.GetProperty("status").GetString() == "active",
+            "Direct JsonElement validation response was not preserved after parsing.");
+    }
+
+    internal static void TestHttp200EnvelopeRejectsExplicitBusinessErrors()
+    {
+        const string sensitiveText = "synthetic-api-key=do-not-expose";
+        var cases = new (string Name, string Json, string? ExpectedCode)[]
+        {
+            ("success false", """{"success":false,"data":{"apis":[]}}""", null),
+            ("nonempty error", """{"code":0,"error":"synthetic-api-key=do-not-expose","data":{"apis":[]}}""", "0"),
+            ("failure code", """{"code":"UPSTREAM_FAILED","data":{"apis":[]}}""", "UPSTREAM_FAILED"),
+            ("failure status", """{"status":"UPSTREAM_FAILED","data":{"apis":[]}}""", "UPSTREAM_FAILED"),
+            ("unrecognized failure status", """{"status":"NOT_OK","data":{"apis":[]}}""", "NOT_OK"),
+            ("conflicting success", """{"code":0,"success":false,"data":{"apis":[]}}""", "0")
+        };
+
+        foreach (var item in cases)
+        {
+            var handler = new StubHttpMessageHandler(_ => JsonResponse(item.Json));
+            using var client = new AIHubClient("https://example.test", messageHandler: handler);
+
+            try
+            {
+                client.GetProviderSummaryAsync(CancellationToken.None).GetAwaiter().GetResult();
+                throw new InvalidOperationException($"HTTP 200 {item.Name} response was accepted.");
+            }
+            catch (AIHubApiException exception)
+            {
+                Assert(exception.ApiCode == item.ExpectedCode,
+                    $"HTTP 200 {item.Name} response did not retain the expected API code.");
+                Assert(!exception.Message.Contains(sensitiveText, StringComparison.Ordinal),
+                    $"HTTP 200 {item.Name} response leaked server content.");
+            }
+        }
+    }
+
+    internal static void TestHttp200EnvelopeUsesNestedErrorCode()
+    {
+        const string sensitiveText = "temporary-token=do-not-expose";
+        var handler = new StubHttpMessageHandler(_ => JsonResponse("""
+            {"code":0,"success":false,"error":{"code":"UPSTREAM_FAILED","message":"temporary-token=do-not-expose"},"data":{"apis":[]}}
+            """));
+        using var client = new AIHubClient("https://example.test", messageHandler: handler);
+
+        try
+        {
+            client.GetProviderSummaryAsync(CancellationToken.None).GetAwaiter().GetResult();
+            throw new InvalidOperationException("Nested HTTP 200 error was accepted.");
+        }
+        catch (AIHubApiException exception)
+        {
+            Assert(exception.ApiCode == "UPSTREAM_FAILED", "Nested error code was not retained.");
+            Assert(!exception.Message.Contains(sensitiveText, StringComparison.Ordinal),
+                "Nested HTTP 200 error leaked server content.");
+        }
+    }
+
+    internal static void TestHttp200EnvelopeRejectsMalformedOrMissingPayload()
+    {
+        var responseBodies = new[]
+        {
+            string.Empty,
+            "{",
+            """{"success":true}""",
+            """{"code":200,"data":null}""",
+            """{"status":"success","payload":null}"""
+        };
+
+        foreach (var responseBody in responseBodies)
+        {
+            var handler = new StubHttpMessageHandler(_ => JsonResponse(responseBody));
+            using var client = new AIHubClient("https://example.test", messageHandler: handler);
+
+            try
+            {
+                client.GetProviderSummaryAsync(CancellationToken.None).GetAwaiter().GetResult();
+                throw new InvalidOperationException("Malformed HTTP 200 response was accepted.");
+            }
+            catch (AIHubApiException)
+            {
+            }
+        }
+    }
+
+    internal static void TestHttp200EnvelopeSafePresentationHidesSuccessfulStatus()
+    {
+        const string sensitiveText = "synthetic-cookie=do-not-expose";
+        var exception = new AIHubApiException(sensitiveText, HttpStatusCode.OK, "UPSTREAM_FAILED");
+
+        var message = SafeErrorPresentation.GetMessage(exception);
+
+        Assert(!message.Contains("HTTP 200", StringComparison.Ordinal),
+            "HTTP 200 business failure was presented as an HTTP failure.");
+        Assert(!message.Contains(sensitiveText, StringComparison.Ordinal),
+            "HTTP 200 business failure exposed sensitive server content.");
+    }
+
     internal static void TestAuthenticationErrorHidesServerMessage()
     {
         const string sensitiveMessage = "synthetic-email@example.test synthetic-temporary-token";

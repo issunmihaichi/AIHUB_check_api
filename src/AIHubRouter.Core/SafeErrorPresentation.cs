@@ -25,6 +25,14 @@ public static class SafeErrorPresentation
 
     private static string GetApiMessage(AIHubApiException exception)
     {
+        if (exception.StatusCode is { } successfulStatus &&
+            (int)successfulStatus is >= 200 and <= 299)
+        {
+            return exception.IsAuthenticationRequest
+                ? "认证响应表示失败或格式不兼容，请重新验证登录信息。"
+                : "AIHub 返回了业务错误或无法识别的响应格式，请稍后重试。";
+        }
+
         if (exception.IsAuthenticationRequest)
         {
             return exception.StatusCode switch
