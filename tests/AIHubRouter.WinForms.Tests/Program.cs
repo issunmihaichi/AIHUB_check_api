@@ -14,7 +14,8 @@ internal static class Program
         {
             ("Apply preserves intrinsic enabled states", TestApplyPreservesIntrinsicEnabledStates),
             ("Probe preserves intrinsic enabled states", TestProbePreservesIntrinsicEnabledStates),
-            ("Probe can be cancelled from the dialog", TestProbeCanBeCancelledFromDialog)
+            ("Probe can be cancelled from the dialog", TestProbeCanBeCancelledFromDialog),
+            ("Probe latency source follows freshness", TestProbeLatencySourceFollowsFreshness)
         })
         {
             try
@@ -98,6 +99,32 @@ internal static class Program
         Assert(cancelButton.Text == "取消" && cancelButton.DialogResult == DialogResult.Cancel,
             "The dialog cancel button did not restore its normal close behavior.");
         AssertEnabledStatePreserved(dialog, before);
+    }
+
+    private static void TestProbeLatencySourceFollowsFreshness()
+    {
+        var provider = new ProviderStatus
+        {
+            FirstTokenLatencyMs = 2_000,
+            ActiveProbeFirstTokenLatencyMs = 100,
+            ActiveProbeSampleCount = 3
+        };
+        var expired = new ProviderGridRow
+        {
+            Source = provider,
+            UsesActiveProbeLatency = false
+        };
+        Assert(expired.FirstTokenSource == "运营商上报",
+            "An expired local probe was still presented as the active TTFT source.");
+
+        var fresh = new ProviderGridRow
+        {
+            Source = provider,
+            UsesActiveProbeLatency = true
+        };
+        Assert(fresh.FirstToken == "100 ms" &&
+            fresh.FirstTokenSource == "本机中位数 100 ms / 共 3 次探测",
+            "A fresh local probe was not presented as the active TTFT source.");
     }
 
     private static RoutingSettingsDialog CreateDialog(

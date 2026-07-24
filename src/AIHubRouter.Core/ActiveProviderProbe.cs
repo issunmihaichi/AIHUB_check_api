@@ -29,6 +29,39 @@ public sealed record ActiveProbeMeasurement(
     }
 }
 
+public sealed record ActiveProbeObservation(
+    string Platform,
+    long GroupId,
+    DateTimeOffset ObservedAt,
+    bool Success,
+    double? FirstTokenLatencyMs = null)
+{
+    public void Validate()
+    {
+        if (string.IsNullOrWhiteSpace(Platform))
+        {
+            throw new ArgumentException("An active-probe platform is required.", nameof(Platform));
+        }
+
+        if (GroupId <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(GroupId));
+        }
+
+        if (FirstTokenLatencyMs is { } latency && (!double.IsFinite(latency) || latency < 0))
+        {
+            throw new ArgumentOutOfRangeException(nameof(FirstTokenLatencyMs));
+        }
+
+        if (!Success && FirstTokenLatencyMs is not null)
+        {
+            throw new ArgumentException(
+                "A failed active-probe observation cannot contain TTFT data.",
+                nameof(FirstTokenLatencyMs));
+        }
+    }
+}
+
 public sealed record ActiveProbeConfiguration(
     string BaseUrl,
     string ApiKey,
@@ -79,6 +112,29 @@ public sealed record ActiveProbeCycleResult(
 public sealed class ActiveProbeRestoreException(Exception innerException) : InvalidOperationException(
     "The dedicated active-probe Key could not be restored.",
     innerException);
+
+public sealed class ActiveProbeProtocolException : InvalidOperationException
+{
+    public ActiveProbeProtocolException(string? apiCode = null)
+        : base("The active probe received an invalid or failed upstream response.")
+    {
+        ApiCode = NormalizeApiCode(apiCode);
+    }
+
+    public string? ApiCode { get; }
+
+    private static string? NormalizeApiCode(string? apiCode)
+    {
+        var value = apiCode?.Trim();
+        if (string.IsNullOrEmpty(value) || value.Length > 64 ||
+            value.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not '_' and not '-' and not '.'))
+        {
+            return null;
+        }
+
+        return value;
+    }
+}
 
 public interface IUpstreamProbeClient : IDisposable
 {
@@ -152,6 +208,11 @@ public sealed class OpenAiStreamingProbeClient : IUpstreamProbeClient
         }
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        if (IsJsonMediaType(response.Content.Headers.ContentType?.MediaType))
+        {
+            await ThrowJsonResponseAsync(stream, cancellationToken);
+        }
+
         using var reader = new StreamReader(stream);
         while (await reader.ReadLineAsync(cancellationToken) is { } line)
         {
@@ -166,6 +227,11 @@ public sealed class OpenAiStreamingProbeClient : IUpstreamProbeClient
                 break;
             }
 
+            if (payload.Length == 0)
+            {
+                throw new ActiveProbeProtocolException();
+            }
+
             if (HasContentToken(payload))
             {
                 var completed = _timestamp();
@@ -177,17 +243,38 @@ public sealed class OpenAiStreamingProbeClient : IUpstreamProbeClient
             }
         }
 
-        throw new InvalidOperationException("Active probe did not receive a content token.");
+        throw new ActiveProbeProtocolException();
     }
 
     public void Dispose() => _httpClient.Dispose();
 
     private static bool HasContentToken(string payload)
     {
+        JsonDocument document;
         try
         {
-            using var document = JsonDocument.Parse(payload);
-            if (!document.RootElement.TryGetProperty("choices", out var choices) ||
+            document = JsonDocument.Parse(payload);
+        }
+        catch (JsonException)
+        {
+            throw new ActiveProbeProtocolException();
+        }
+
+        using (document)
+        {
+            var envelope = ApiResponseEnvelope.Classify(document.RootElement);
+            if (envelope.IsFailure)
+            {
+                throw new ActiveProbeProtocolException(envelope.ApiCode);
+            }
+
+            var root = envelope.Payload;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                throw new ActiveProbeProtocolException();
+            }
+
+            if (!root.TryGetProperty("choices", out var choices) ||
                 choices.ValueKind != JsonValueKind.Array)
             {
                 return false;
@@ -205,12 +292,32 @@ public sealed class OpenAiStreamingProbeClient : IUpstreamProbeClient
                 }
             }
         }
-        catch (JsonException)
-        {
-            // Ignore non-SSE data lines until the upstream sends a usable token.
-        }
 
         return false;
+    }
+
+    private static bool IsJsonMediaType(string? mediaType) =>
+        mediaType is not null &&
+        (mediaType.Equals("application/json", StringComparison.OrdinalIgnoreCase) ||
+            mediaType.EndsWith("+json", StringComparison.OrdinalIgnoreCase));
+
+    private static async Task ThrowJsonResponseAsync(Stream stream, CancellationToken cancellationToken)
+    {
+        JsonDocument document;
+        try
+        {
+            document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+        }
+        catch (JsonException)
+        {
+            throw new ActiveProbeProtocolException();
+        }
+
+        using (document)
+        {
+            var envelope = ApiResponseEnvelope.Classify(document.RootElement);
+            throw new ActiveProbeProtocolException(envelope.IsFailure ? envelope.ApiCode : null);
+        }
     }
 
     private static string NormalizeApiKey(string value)

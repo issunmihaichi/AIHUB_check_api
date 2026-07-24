@@ -253,7 +253,7 @@ internal static partial class CoreTestCases
             "A timeout while restoring the test Key was reported as an ordinary cancellation.");
     }
 
-    internal static void TestActiveProbeMetricsOverrideReportedLatency()
+    internal static void TestActiveProbeMetricsPreserveReportedLatency()
     {
         var now = new DateTimeOffset(2026, 7, 23, 8, 0, 0, TimeSpan.Zero);
         var window = new ProviderMetricsRollingWindow();
@@ -266,10 +266,198 @@ internal static partial class CoreTestCases
             [new ActiveProbeMeasurement("openai", 1, now, 180)]);
         var provider = snapshot.Providers.Single();
 
-        Assert(provider.FirstTokenLatencyMs == 180, "Fresh active probing did not override reported latency.");
+        Assert(provider.FirstTokenLatencyMs == 2_000,
+            "Recording a local probe discarded the provider-reported latency needed after TTL expiry.");
         Assert(provider.ActiveProbeFirstTokenLatencyMs == 180, "Active probe latency was not exposed for presentation.");
         Assert(provider.ActiveProbeCheckedAt == now, "Active probe timestamp was not preserved.");
         Assert(provider.OutputTokensPerSecond == 20, "A one-token active probe overwrote reported output speed.");
+    }
+
+    internal static void TestActiveProbeObservationsTrackFailureAndRecovery()
+    {
+        var startedAt = new DateTimeOffset(2026, 7, 24, 8, 0, 0, TimeSpan.Zero);
+        var window = new ProviderMetricsRollingWindow();
+        window.Observe(
+            startedAt,
+            [Provider(1, 0.01, true, 1, startedAt, latency: 2_000, outputTps: 20)],
+            new Dictionary<long, double>());
+
+        window.RecordActiveProbeObservations(
+        [
+            new ActiveProbeObservation(" openai ", 1, startedAt.AddSeconds(1), true, 100),
+            new ActiveProbeObservation("openai", 1, startedAt.AddSeconds(2), false)
+        ]);
+        var failed = window.RecordActiveProbeObservations([]).Providers.Single();
+
+        Assert(failed.ActiveProbeHealthy == false,
+            "The latest failed observation did not mark the provider unhealthy.");
+        Assert(failed.ActiveProbeCheckedAt == startedAt.AddSeconds(2),
+            "The latest failed observation timestamp was not retained.");
+        Assert(failed.ActiveProbeSampleCount == 2,
+            "Success and failure observations were not both counted.");
+        Assert(failed.ActiveProbeFirstTokenLatencyMs == 100 && failed.FirstTokenLatencyMs == 2_000,
+            "A failed observation replaced provider or successful local TTFT with fake data.");
+
+        var recovered = window.RecordActiveProbeObservations(
+            [new ActiveProbeObservation("openai", 1, startedAt.AddSeconds(3), true, 300)])
+            .Providers.Single();
+
+        Assert(recovered.ActiveProbeHealthy == true,
+            "A later successful observation did not recover probe health.");
+        Assert(recovered.ActiveProbeCheckedAt == startedAt.AddSeconds(3),
+            "Recovery did not become the latest probe observation.");
+        Assert(recovered.ActiveProbeSampleCount == 3,
+            "Recovery was not included in the probe sample count.");
+        Assert(recovered.ActiveProbeFirstTokenLatencyMs == 200,
+            "Local TTFT did not use the median of successful observations only.");
+
+        var sameTimestamp = startedAt.AddSeconds(4);
+        var sameTimestampResult = window.RecordActiveProbeObservations(
+        [
+            new ActiveProbeObservation("openai", 1, sameTimestamp, true, 500),
+            new ActiveProbeObservation("openai", 1, sameTimestamp, false)
+        ]).Providers.Single();
+        Assert(sameTimestampResult.ActiveProbeHealthy == false,
+            "The last recorded observation did not win a same-timestamp health tie.");
+
+        var outOfOrder = window.RecordActiveProbeObservations(
+        [
+            new ActiveProbeObservation("openai", 1, startedAt.AddSeconds(6), true, 700),
+            new ActiveProbeObservation("openai", 1, startedAt.AddSeconds(5), false)
+        ]).Providers.Single();
+        Assert(outOfOrder.ActiveProbeHealthy == true &&
+            outOfOrder.ActiveProbeCheckedAt == startedAt.AddSeconds(6),
+            "An older out-of-order observation replaced the newest probe health.");
+    }
+
+    internal static void TestActiveProbeLateExpiredSampleCannotPolluteMedian()
+    {
+        var now = new DateTimeOffset(2026, 7, 24, 10, 0, 0, TimeSpan.Zero);
+        var window = new ProviderMetricsRollingWindow();
+        window.Observe(
+            now,
+            [Provider(1, 0.01, true, 1, now, latency: 2_000)],
+            new Dictionary<long, double>());
+        window.RecordActiveProbeObservations(
+            [new ActiveProbeObservation("openai", 1, now, true, 100)]);
+
+        var snapshot = window.RecordActiveProbeObservations(
+            [new ActiveProbeObservation("openai", 1, now.AddMinutes(-31), true, 10_000)]);
+        var provider = snapshot.Providers.Single();
+
+        Assert(provider.ActiveProbeSampleCount == 1 &&
+            provider.ActiveProbeFirstTokenLatencyMs == 100 &&
+            provider.ActiveProbeCheckedAt == now,
+            "A late expired probe sample polluted the active-probe rolling window.");
+    }
+
+    internal static void TestActiveProbeObservationValidation()
+    {
+        AssertThrows<ArgumentException>(
+            () => new ActiveProbeObservation(" ", 1, DateTimeOffset.UtcNow, true, 1).Validate(),
+            "A blank probe platform was accepted.");
+        AssertThrows<ArgumentOutOfRangeException>(
+            () => new ActiveProbeObservation("openai", 0, DateTimeOffset.UtcNow, true, 1).Validate(),
+            "A non-positive probe group was accepted.");
+        AssertThrows<ArgumentOutOfRangeException>(
+            () => new ActiveProbeObservation("openai", 1, DateTimeOffset.UtcNow, true, double.NaN).Validate(),
+            "A non-finite probe TTFT was accepted.");
+        AssertThrows<ArgumentException>(
+            () => new ActiveProbeObservation("openai", 1, DateTimeOffset.UtcNow, false, 1).Validate(),
+            "A failed observation was allowed to carry fake TTFT data.");
+    }
+
+    internal static void TestActiveProbePolicyTtlUsesConfiguredInterval()
+    {
+        Assert(new PersistentAppSettings().CreatePolicy().ActiveProbeMaximumAge is null,
+            "Disabled probing unexpectedly enabled a health TTL.");
+        Assert(new PersistentAppSettings
+        {
+            ActiveProbeEnabled = true,
+            ActiveProbeIntervalSeconds = 90
+        }.CreatePolicy().ActiveProbeMaximumAge == TimeSpan.FromSeconds(180),
+            "Probe TTL was not twice the configured interval.");
+        Assert(new PersistentAppSettings
+        {
+            ActiveProbeEnabled = true,
+            ActiveProbeIntervalSeconds = 0
+        }.CreatePolicy().ActiveProbeMaximumAge == TimeSpan.FromSeconds(180),
+            "An invalid interval did not fall back to the safe default.");
+        Assert(new PersistentAppSettings
+        {
+            ActiveProbeEnabled = true,
+            ActiveProbeIntervalSeconds = int.MaxValue
+        }.CreatePolicy().ActiveProbeMaximumAge == TimeSpan.FromMinutes(30),
+            "A huge probe interval bypassed the thirty-minute TTL cap.");
+    }
+
+    internal static void TestActiveProbeHttp200JsonErrorIsStructuredAndSafe()
+    {
+        const string sensitiveDetail = "sensitive-upstream-detail";
+        var exception = CaptureProbeProtocolException(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                $"{{\"error\":{{\"code\":\"invalid_api_key\",\"message\":\"{sensitiveDetail}\"}}}}",
+                Encoding.UTF8,
+                "application/json")
+        });
+
+        Assert(exception.ApiCode == "invalid_api_key",
+            "The safe API code was not retained from an HTTP 200 JSON error.");
+        Assert(!exception.Message.Contains(sensitiveDetail, StringComparison.Ordinal),
+            "The structured probe exception leaked an upstream error message.");
+    }
+
+    internal static void TestActiveProbeStructuredJsonSuffixErrorIsRejected()
+    {
+        var exception = CaptureProbeProtocolException(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                "{\"code\":\"upstream_unavailable\",\"status\":\"error\"}",
+                Encoding.UTF8,
+                "application/problem+json")
+        });
+
+        Assert(exception.ApiCode == "upstream_unavailable",
+            "An application/*+json error did not retain its safe API code.");
+    }
+
+    internal static void TestActiveProbeSseErrorIsStructuredAndSafe()
+    {
+        const string sensitiveDetail = "sensitive-stream-detail";
+        var exception = CaptureProbeProtocolException(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                $"data: {{\"error\":{{\"code\":\"rate_limit_exceeded\",\"message\":\"{sensitiveDetail}\"}}}}\n\n",
+                Encoding.UTF8,
+                "text/event-stream")
+        });
+
+        Assert(exception.ApiCode == "rate_limit_exceeded",
+            "The safe API code was not retained from an SSE error event.");
+        Assert(!exception.Message.Contains(sensitiveDetail, StringComparison.Ordinal),
+            "The structured SSE exception leaked an upstream error message.");
+    }
+
+    internal static void TestActiveProbeMalformedDataNeverBecomesSuccess()
+    {
+        var sseException = CaptureProbeProtocolException(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                "data: not-json\n\n" +
+                "data: {\"choices\":[{\"delta\":{\"content\":\"pong\"}}]}\n\n",
+                Encoding.UTF8,
+                "text/event-stream")
+        });
+        Assert(sseException.ApiCode is null,
+            "Malformed SSE data invented an API error code.");
+
+        var jsonException = CaptureProbeProtocolException(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{not-json", Encoding.UTF8, "application/json")
+        });
+        Assert(jsonException.ApiCode is null,
+            "Malformed JSON invented an API error code.");
     }
 
     internal static void TestActiveProbeKeyPersistsOnlyInCredentials()
@@ -339,6 +527,46 @@ internal static partial class CoreTestCases
 
         Assert(persisted?.ActiveProbeApiKey == "probe-key-value",
             "Session refresh dropped the active-probe API Key from encrypted persistence.");
+    }
+
+    private static ActiveProbeProtocolException CaptureProbeProtocolException(HttpResponseMessage response)
+    {
+        using var probe = new OpenAiStreamingProbeClient(
+            new StubHttpMessageHandler(_ => response));
+        try
+        {
+            probe.ProbeAsync(
+                    new ActiveProbeRequest(
+                        "https://example.test",
+                        "probe-key-value",
+                        "probe-model",
+                        "openai",
+                        1),
+                    CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+        }
+        catch (ActiveProbeProtocolException exception)
+        {
+            return exception;
+        }
+
+        throw new InvalidOperationException("The invalid probe response was accepted as successful.");
+    }
+
+    private static void AssertThrows<TException>(Action action, string message)
+        where TException : Exception
+    {
+        try
+        {
+            action();
+        }
+        catch (TException)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(message);
     }
 }
 

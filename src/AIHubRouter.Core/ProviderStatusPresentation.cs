@@ -9,19 +9,21 @@ public static class ProviderStatusPresentation
         double effectiveMultiplier,
         double minimumSuccessRate6h,
         DateTimeOffset now,
-        TimeSpan maximumStatusAge)
+        TimeSpan maximumStatusAge,
+        TimeSpan? activeProbeMaximumAge = null)
     {
         ArgumentNullException.ThrowIfNull(provider);
         var isRateValid = provider.PriceMultiplier >= 0 &&
             double.IsFinite(provider.PriceMultiplier) &&
             effectiveMultiplier >= 0 &&
             double.IsFinite(effectiveMultiplier);
-        var hasEvidence = RoutingEngine.HasUsableRoutingEvidence(provider);
+        var hasEvidence = RoutingEngine.HasUsableRoutingEvidence(provider, now, activeProbeMaximumAge);
         return provider.Enabled &&
             provider.Available &&
+            !RoutingEngine.HasFreshActiveProbeFailure(provider, now, activeProbeMaximumAge) &&
             isRateValid &&
             hasEvidence &&
-            (provider.SuccessRate6h ?? 0) >= minimumSuccessRate6h &&
+            RoutingEngine.NormalizeSuccessRate(provider.SuccessRate6h) >= minimumSuccessRate6h &&
             (!hasAccountData || isAuthorized);
     }
 
@@ -32,25 +34,27 @@ public static class ProviderStatusPresentation
         double effectiveMultiplier,
         double minimumSuccessRate6h,
         DateTimeOffset now,
-        TimeSpan maximumStatusAge)
+        TimeSpan maximumStatusAge,
+        TimeSpan? activeProbeMaximumAge = null)
     {
         ArgumentNullException.ThrowIfNull(provider);
         var isRateValid = provider.PriceMultiplier >= 0 &&
             double.IsFinite(provider.PriceMultiplier) &&
             effectiveMultiplier >= 0 &&
             double.IsFinite(effectiveMultiplier);
-        var hasEvidence = RoutingEngine.HasUsableRoutingEvidence(provider);
+        var hasEvidence = RoutingEngine.HasUsableRoutingEvidence(provider, now, activeProbeMaximumAge);
         var evidenceWeight = hasEvidence
             ? RoutingEngine.CalculateEvidenceWeight(
-                RoutingEngine.GetLatestEvidenceTimestamp(provider),
+                RoutingEngine.GetLatestEvidenceTimestamp(provider, now, activeProbeMaximumAge),
                 now,
                 maximumStatusAge)
             : 0;
         var state = !provider.Enabled ? "已停用"
             : !provider.Available ? "当前异常"
+            : RoutingEngine.HasFreshActiveProbeFailure(provider, now, activeProbeMaximumAge) ? "健康检查失败"
             : !isRateValid ? "倍率无效"
             : !hasEvidence ? "数据过期"
-            : (provider.SuccessRate6h ?? 0) < minimumSuccessRate6h ? "低于阈值"
+            : RoutingEngine.NormalizeSuccessRate(provider.SuccessRate6h) < minimumSuccessRate6h ? "低于阈值"
             : hasAccountData && !isAuthorized ? "账号不可用"
             : !hasAccountData ? "待认证"
             : evidenceWeight < 1 ? "数据陈旧（已降权）"

@@ -172,6 +172,7 @@ internal sealed partial class MainForm
             StringComparer.Ordinal);
         var minimumSuccessRate6h = (double)_minimumSuccessInput.Value / 100;
         var maximumStatusAge = RoutingEngine.DefaultMaximumStatusAge;
+        var activeProbeMaximumAge = CurrentActiveProbeMaximumAge();
         var rows = result.Providers
             .Where(provider => provider.Platform.Equals(_platformCombo.SelectedItem?.ToString() ?? "openai", StringComparison.OrdinalIgnoreCase))
             .Select(provider =>
@@ -222,9 +223,13 @@ internal sealed partial class MainForm
                 var isRoutable = !isBlocked && groupId is { } eligibleGroupId &&
                     eligibleGroupIds.Contains(eligibleGroupId);
                 var effective = $"{effectiveMultiplier:0.####}{(hasOverride ? " *" : string.Empty)}";
+                var displayProvider = RoutingEngine.ResolveActiveProbeMetrics(
+                    provider,
+                    result.Decision.EvaluatedAt,
+                    activeProbeMaximumAge);
                 return new ProviderGridRow
                 {
-                    Source = provider,
+                    Source = displayProvider,
                     IsRoutable = isRoutable,
                     IsBest = !isBlocked && provider.Id == result.Decision.Target?.Provider.Id,
                     IsBlocked = isBlocked,
@@ -235,6 +240,10 @@ internal sealed partial class MainForm
                     AdaptiveRankValue = adaptiveRankValue,
                     DecisionState = decisionState,
                     BlockStatus = BlockReasonText(blockReason),
+                    UsesActiveProbeLatency = RoutingEngine.UsesFreshActiveProbeLatency(
+                        provider,
+                        result.Decision.EvaluatedAt,
+                        activeProbeMaximumAge),
                     State = isBlocked ? "已拉黑" : ProviderStatusPresentation.ResolveRoutingState(
                         provider,
                         hasAccountData: true,
@@ -242,7 +251,8 @@ internal sealed partial class MainForm
                         effectiveMultiplier: effectiveMultiplier,
                         minimumSuccessRate6h: minimumSuccessRate6h,
                         now: result.Decision.EvaluatedAt,
-                        maximumStatusAge: maximumStatusAge)
+                        maximumStatusAge: maximumStatusAge,
+                        activeProbeMaximumAge: activeProbeMaximumAge)
                 };
             })
             .OrderByDescending(row => row.IsRoutable)
@@ -414,7 +424,10 @@ internal sealed partial class MainForm
             platform,
             (double)_minimumSuccessInput.Value / 100,
             RoutingEngine.DefaultMaximumStatusAge,
-            _providerBlocklist);
+            _providerBlocklist)
+        {
+            ActiveProbeMaximumAge = CurrentActiveProbeMaximumAge()
+        };
 
         var now = DateTimeOffset.UtcNow;
         var selectedGroupIds = CurrentKeyRows()
@@ -440,6 +453,7 @@ internal sealed partial class MainForm
             Mode = CurrentRoutingMode(),
             MinimumSuccessRate6h = criteria.MinimumSuccessRate6h,
             MaximumStatusAge = criteria.MaximumStatusAge,
+            ActiveProbeMaximumAge = criteria.ActiveProbeMaximumAge,
             Blocklist = _providerBlocklist
         };
         var snapshot = RouteDecisionCoordinator.Evaluate(
@@ -541,9 +555,13 @@ internal sealed partial class MainForm
                     adaptiveRank = "固定";
                     adaptiveRankValue = 0;
                 }
+                var displayProvider = RoutingEngine.ResolveActiveProbeMetrics(
+                    provider,
+                    now,
+                    criteria.ActiveProbeMaximumAge);
                 return new ProviderGridRow
                 {
-                    Source = provider,
+                    Source = displayProvider,
                     IsRoutable = isRoutable,
                     IsBest = !isBlocked && _bestCandidate?.Provider.Id == provider.Id,
                     IsBlocked = isBlocked,
@@ -562,6 +580,10 @@ internal sealed partial class MainForm
                             baselineGroupId == _lastEvaluation?.Baseline?.Group.Id ? "最低价"
                         : string.Empty,
                     BlockStatus = BlockReasonText(blockReason),
+                    UsesActiveProbeLatency = RoutingEngine.UsesFreshActiveProbeLatency(
+                        provider,
+                        now,
+                        criteria.ActiveProbeMaximumAge),
                     State = isBlocked ? "已拉黑" : ProviderStatusPresentation.ResolveRoutingState(
                         provider,
                         hasAccountData,
@@ -569,7 +591,8 @@ internal sealed partial class MainForm
                         effectiveMultiplier: effectiveRate,
                         minimumSuccessRate6h: criteria.MinimumSuccessRate6h,
                         now: now,
-                        maximumStatusAge: criteria.MaximumStatusAge)
+                        maximumStatusAge: criteria.MaximumStatusAge,
+                        activeProbeMaximumAge: criteria.ActiveProbeMaximumAge)
                 };
             })
             .OrderByDescending(row => row.IsRoutable)
@@ -577,7 +600,7 @@ internal sealed partial class MainForm
             .ThenBy(row => row.AdaptiveRankValue)
             .ThenByDescending(row => row.IsBest)
             .ThenBy(row => row.Source.PriceMultiplier)
-            .ThenByDescending(row => row.Source.SuccessRate6h ?? 0)
+            .ThenByDescending(row => RoutingEngine.NormalizeSuccessRate(row.Source.SuccessRate6h))
             .ToList();
 
         _providerGrid.DataSource = new BindingList<ProviderGridRow>(rows);

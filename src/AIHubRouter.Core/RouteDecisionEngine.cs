@@ -381,7 +381,7 @@ public static class RouteDecisionEngine
     private static RouteCandidate? SelectStrictCheapest(IEnumerable<RouteCandidate> candidates) =>
         candidates
             .OrderBy(candidate => candidate.EffectiveMultiplier)
-            .ThenByDescending(candidate => candidate.Provider.SuccessRate6h ?? 0)
+            .ThenByDescending(candidate => RoutingEngine.NormalizeSuccessRate(candidate.Provider.SuccessRate6h))
             .ThenBy(candidate => RoutingEngine.NormalizeLatency(candidate.Provider.FirstTokenLatencyMs))
             .ThenBy(candidate => candidate.Group.Id)
             .FirstOrDefault();

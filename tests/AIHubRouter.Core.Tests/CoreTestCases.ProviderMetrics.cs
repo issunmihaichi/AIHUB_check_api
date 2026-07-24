@@ -137,6 +137,49 @@ internal static partial class CoreTestCases
             "Restoring latest state changed numeric median aggregation.");
     }
 
+    internal static void TestRollingProviderMetricsIgnoreOutOfOrderCurrentState()
+    {
+        var now = new DateTimeOffset(2026, 7, 24, 10, 0, 0, TimeSpan.Zero);
+        var window = new ProviderMetricsRollingWindow();
+
+        window.Observe(
+            now,
+            [Provider(1, 0.01, available: true, success: 1, checkedAt: now, enabled: true)],
+            new Dictionary<long, double> { [1] = 0.02 });
+        var snapshot = window.Observe(
+            now.AddMinutes(-1),
+            [Provider(1, 0.99, available: false, success: 0, checkedAt: now.AddMinutes(-1), enabled: false)],
+            new Dictionary<long, double> { [1] = 0.98 });
+
+        var provider = snapshot.Providers.Single();
+        Assert(provider.Available && provider.Enabled && provider.CheckedAt == now,
+            "An out-of-order provider snapshot replaced the latest current state.");
+        Assert(snapshot.UserGroupRates.TryGetValue(1, out var rate) && Math.Abs(rate - 0.5) < 0.000001,
+            "Ignoring out-of-order current state also discarded its valid historical rate sample.");
+    }
+
+    internal static void TestRollingProviderMetricsSurviveProbeWatermarkAdvance()
+    {
+        var observedAt = new DateTimeOffset(2026, 7, 24, 10, 0, 0, TimeSpan.Zero);
+        var window = new ProviderMetricsRollingWindow();
+        window.Observe(
+            observedAt,
+            [Provider(1, 0.01, available: true, success: 1, checkedAt: observedAt,
+                latency: 2_000, outputTps: 20)],
+            new Dictionary<long, double>());
+
+        var snapshot = window.RecordActiveProbeObservations(
+            [new ActiveProbeObservation("openai", 1, observedAt.AddMinutes(31), true, 100)]);
+        var provider = snapshot.Providers.Single();
+
+        Assert(provider.Available && provider.CheckedAt == observedAt,
+            "Advancing the probe watermark discarded the retained provider state.");
+        Assert(provider.FirstTokenLatencyMs == 2_000 && provider.OutputTokensPerSecond == 20,
+            "Advancing the probe watermark discarded stale but usable provider metrics.");
+        Assert(provider.ActiveProbeHealthy == true && provider.ActiveProbeFirstTokenLatencyMs == 100,
+            "The probe observation was lost while retaining stale provider metrics.");
+    }
+
     internal static void TestRollingProviderMetricsClearHistory()
     {
         var now = new DateTimeOffset(2026, 7, 22, 9, 0, 0, TimeSpan.Zero);
@@ -235,6 +278,31 @@ internal static partial class CoreTestCases
             "Rolling metrics did not use the conservative P90 first-token latency.");
         Assert(provider.OutputTokensPerSecondP25 == 10,
             "Rolling metrics did not use the conservative P25 output speed.");
+    }
+
+    internal static void TestRollingProviderMetricsNormalizeRawReliability()
+    {
+        var now = new DateTimeOffset(2026, 7, 24, 10, 0, 0, TimeSpan.Zero);
+        var window = new ProviderMetricsRollingWindow();
+        window.Observe(
+            now.AddMinutes(-3),
+            [Provider(1, 0.01, true, 2, now.AddMinutes(-3))],
+            new Dictionary<long, double>());
+        window.Observe(
+            now.AddMinutes(-2),
+            [Provider(1, 0.01, true, -1, now.AddMinutes(-2))],
+            new Dictionary<long, double>());
+        window.Observe(
+            now.AddMinutes(-1),
+            [Provider(1, 0.01, true, double.NaN, now.AddMinutes(-1))],
+            new Dictionary<long, double>());
+        var snapshot = window.Observe(
+            now,
+            [Provider(1, 0.01, true, double.PositiveInfinity, now)],
+            new Dictionary<long, double>());
+
+        Assert(Math.Abs((snapshot.Providers.Single().SuccessRate6h ?? -1) - 0.5) < 0.000001,
+            "Rolling reliability did not clamp finite values and ignore non-finite values before its median.");
     }
 
 }

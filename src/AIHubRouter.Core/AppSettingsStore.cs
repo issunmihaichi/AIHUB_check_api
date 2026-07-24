@@ -7,6 +7,9 @@ namespace AIHubRouter.Core;
 
 public sealed class PersistentAppSettings
 {
+    private const int DefaultActiveProbeIntervalSeconds = 90;
+    private static readonly TimeSpan MaximumActiveProbeAge = TimeSpan.FromMinutes(30);
+
     public bool PersistCredentials { get; init; }
     public string BaseUrl { get; init; } = "https://aihub.top";
     public string Platform { get; init; } = "openai";
@@ -44,8 +47,27 @@ public sealed class PersistentAppSettings
             Mode = RoutingMode,
             MinimumSuccessRate6h = Math.Clamp(MinimumSuccessPercent, 0, 100) / 100d,
             MaximumStatusAge = RoutingEngine.DefaultMaximumStatusAge,
+            ActiveProbeMaximumAge = ResolveActiveProbeMaximumAge(
+                ActiveProbeEnabled,
+                ActiveProbeIntervalSeconds),
             Blocklist = new ProviderBlocklist(BlockedGroupIds, BlockedNodePatterns)
         };
+    }
+
+    public static TimeSpan? ResolveActiveProbeMaximumAge(bool enabled, int intervalSeconds)
+    {
+        if (!enabled)
+        {
+            return null;
+        }
+
+        var normalizedInterval = intervalSeconds > 0
+            ? intervalSeconds
+            : DefaultActiveProbeIntervalSeconds;
+        var ageSeconds = Math.Min(
+            MaximumActiveProbeAge.TotalSeconds,
+            2d * normalizedInterval);
+        return TimeSpan.FromSeconds(ageSeconds);
     }
 }
 

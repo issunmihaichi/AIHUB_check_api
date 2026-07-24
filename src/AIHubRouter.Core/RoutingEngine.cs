@@ -24,13 +24,24 @@ public static class RoutingEngine
         var blocklist = criteria.Blocklist ?? ProviderBlocklist.Empty;
 
         return providers
+            .Select(provider => ResolveActiveProbeMetrics(
+                provider,
+                now,
+                criteria.ActiveProbeMaximumAge))
             .Where(provider => provider.Enabled && provider.Available)
+            .Where(provider => !HasFreshActiveProbeFailure(
+                provider,
+                now,
+                criteria.ActiveProbeMaximumAge))
             .Where(provider => provider.GroupId is > 0 && groups.ContainsKey(provider.GroupId.Value))
             .Where(provider => !blocklist.IsBlocked(provider, groups[provider.GroupId!.Value]))
             .Where(provider => provider.Platform.Equals(criteria.Platform, StringComparison.OrdinalIgnoreCase))
             .Where(provider => provider.PriceMultiplier >= 0 && double.IsFinite(provider.PriceMultiplier))
-            .Where(HasUsableRoutingEvidence)
-            .Where(provider => (provider.SuccessRate6h ?? 0) >= criteria.MinimumSuccessRate6h)
+            .Where(provider => HasUsableRoutingEvidence(
+                provider,
+                now,
+                criteria.ActiveProbeMaximumAge))
+            .Where(provider => NormalizeSuccessRate(provider.SuccessRate6h) >= criteria.MinimumSuccessRate6h)
             .Select(provider =>
             {
                 var group = groups[provider.GroupId!.Value];
@@ -39,7 +50,7 @@ public static class RoutingEngine
                 return new RouteCandidate(provider, group, effectiveRate, hasOverride)
                 {
                     EvidenceWeight = CalculateEvidenceWeight(
-                        GetLatestEvidenceTimestamp(provider),
+                        GetLatestEvidenceTimestamp(provider, now, criteria.ActiveProbeMaximumAge),
                         now,
                         criteria.MaximumStatusAge)
                 };
@@ -48,11 +59,11 @@ public static class RoutingEngine
             .GroupBy(candidate => candidate.Group.Id)
             .Select(group => group
                 .OrderBy(candidate => candidate.EffectiveMultiplier)
-                .ThenByDescending(candidate => candidate.Provider.SuccessRate6h ?? 0)
+                .ThenByDescending(candidate => NormalizeSuccessRate(candidate.Provider.SuccessRate6h))
                 .ThenBy(candidate => candidate.Provider.FirstTokenLatencyMs ?? double.MaxValue)
                 .First())
             .OrderBy(candidate => candidate.EffectiveMultiplier)
-            .ThenByDescending(candidate => candidate.Provider.SuccessRate6h ?? 0)
+            .ThenByDescending(candidate => NormalizeSuccessRate(candidate.Provider.SuccessRate6h))
             .ThenBy(candidate => candidate.Provider.FirstTokenLatencyMs ?? double.MaxValue)
             .ThenBy(candidate => candidate.Group.Id)
             .FirstOrDefault();
@@ -79,13 +90,24 @@ public static class RoutingEngine
         var blocklist = policy.Blocklist ?? ProviderBlocklist.Empty;
 
         var eligible = providers
+            .Select(provider => ResolveActiveProbeMetrics(
+                provider,
+                now,
+                policy.ActiveProbeMaximumAge))
             .Where(provider => provider.Enabled && provider.Available)
+            .Where(provider => !HasFreshActiveProbeFailure(
+                provider,
+                now,
+                policy.ActiveProbeMaximumAge))
             .Where(provider => provider.GroupId is > 0 && groups.ContainsKey(provider.GroupId.Value))
             .Where(provider => !blocklist.IsBlocked(provider, groups[provider.GroupId!.Value]))
             .Where(provider => provider.Platform.Equals(policy.Platform, StringComparison.OrdinalIgnoreCase))
             .Where(provider => provider.PriceMultiplier >= 0 && double.IsFinite(provider.PriceMultiplier))
-            .Where(HasUsableRoutingEvidence)
-            .Where(provider => (provider.SuccessRate6h ?? 0) >= policy.MinimumSuccessRate6h)
+            .Where(provider => HasUsableRoutingEvidence(
+                provider,
+                now,
+                policy.ActiveProbeMaximumAge))
+            .Where(provider => NormalizeSuccessRate(provider.SuccessRate6h) >= policy.MinimumSuccessRate6h)
             .Select(provider =>
             {
                 var group = groups[provider.GroupId!.Value];
@@ -94,7 +116,7 @@ public static class RoutingEngine
                 return new RouteCandidate(provider, group, effectiveRate, hasOverride)
                 {
                     EvidenceWeight = CalculateEvidenceWeight(
-                        GetLatestEvidenceTimestamp(provider),
+                        GetLatestEvidenceTimestamp(provider, now, policy.ActiveProbeMaximumAge),
                         now,
                         policy.MaximumStatusAge)
                 };
@@ -103,7 +125,7 @@ public static class RoutingEngine
             .GroupBy(candidate => candidate.Group.Id)
             .Select(group => group
                 .OrderBy(candidate => NormalizeLatency(candidate.Provider.FirstTokenLatencyMs))
-                .ThenByDescending(candidate => candidate.Provider.SuccessRate6h ?? 0)
+                .ThenByDescending(candidate => NormalizeSuccessRate(candidate.Provider.SuccessRate6h))
                 .ThenBy(candidate => candidate.EffectiveMultiplier)
                 .ThenBy(candidate => candidate.Provider.Id, StringComparer.Ordinal)
                 .First())
@@ -124,7 +146,7 @@ public static class RoutingEngine
         var cheapest = decisionPool
             .Where(candidate => NearlyEqual(candidate.EffectiveMultiplier, minimumMultiplier))
             .OrderBy(candidate => NormalizeLatency(candidate.Provider.FirstTokenLatencyMs))
-            .ThenByDescending(candidate => candidate.Provider.SuccessRate6h ?? 0)
+            .ThenByDescending(candidate => NormalizeSuccessRate(candidate.Provider.SuccessRate6h))
             .ThenBy(candidate => candidate.Group.Id)
             .ToArray();
         var baseline = cheapest[0];
@@ -161,7 +183,7 @@ public static class RoutingEngine
             .OrderByDescending(candidate => scores[candidate.Group.Id])
             .ThenBy(candidate => candidate.EffectiveMultiplier)
             .ThenBy(candidate => NormalizeLatency(candidate.Provider.FirstTokenLatencyMs))
-            .ThenByDescending(candidate => candidate.Provider.SuccessRate6h ?? 0)
+            .ThenByDescending(candidate => NormalizeSuccessRate(candidate.Provider.SuccessRate6h))
             .ThenBy(candidate => candidate.Group.Id)
             .FirstOrDefault() ?? baseline;
 
@@ -203,18 +225,36 @@ public static class RoutingEngine
     private static bool IsKnownLatency(double? latency) =>
         latency is > 0 && double.IsFinite(latency.Value);
 
-    internal static bool HasUsableRoutingEvidence(ProviderStatus provider)
+    internal static bool HasUsableRoutingEvidence(ProviderStatus provider) =>
+        HasUsableRoutingEvidence(provider, DateTimeOffset.MinValue, activeProbeMaximumAge: null);
+
+    internal static bool HasUsableRoutingEvidence(
+        ProviderStatus provider,
+        DateTimeOffset now,
+        TimeSpan? activeProbeMaximumAge)
     {
         ArgumentNullException.ThrowIfNull(provider);
-        return GetLatestEvidenceTimestamp(provider) is not null ||
+        return GetLatestEvidenceTimestamp(provider, now, activeProbeMaximumAge) is not null ||
             IsKnownLatency(provider.FirstTokenLatencyMs) ||
             IsKnownOutputSpeed(provider.OutputTokensPerSecond);
     }
 
-    internal static DateTimeOffset? GetLatestEvidenceTimestamp(ProviderStatus provider)
+    internal static DateTimeOffset? GetLatestEvidenceTimestamp(ProviderStatus provider) =>
+        GetLatestEvidenceTimestamp(provider, DateTimeOffset.MinValue, activeProbeMaximumAge: null);
+
+    internal static DateTimeOffset? GetLatestEvidenceTimestamp(
+        ProviderStatus provider,
+        DateTimeOffset now,
+        TimeSpan? activeProbeMaximumAge)
     {
         ArgumentNullException.ThrowIfNull(provider);
-        return (provider.CheckedAt, provider.ActiveProbeCheckedAt) switch
+        var freshSuccessfulProbeAt = HasFreshActiveProbeSuccess(
+                provider,
+                now,
+                activeProbeMaximumAge)
+                ? provider.ActiveProbeCheckedAt
+                : null;
+        return (provider.CheckedAt, freshSuccessfulProbeAt) switch
         {
             ({ } checkedAt, { } probeCheckedAt) => checkedAt >= probeCheckedAt ? checkedAt : probeCheckedAt,
             ({ } checkedAt, null) => checkedAt,
@@ -226,10 +266,68 @@ public static class RoutingEngine
     private static bool IsKnownOutputSpeed(double? outputTokensPerSecond) =>
         outputTokensPerSecond is > 0 && double.IsFinite(outputTokensPerSecond.Value);
 
-    private static double NormalizeSuccessRate(double? successRate) =>
+    public static double NormalizeSuccessRate(double? successRate) =>
         successRate is { } value && double.IsFinite(value)
             ? Math.Clamp(value, 0, 1)
             : 0;
+
+    internal static bool HasFreshActiveProbeFailure(
+        ProviderStatus provider,
+        DateTimeOffset now,
+        TimeSpan? activeProbeMaximumAge)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        return provider.ActiveProbeHealthy == false &&
+            IsActiveProbeObservationFresh(provider, now, activeProbeMaximumAge);
+    }
+
+    internal static bool HasFreshActiveProbeSuccess(
+        ProviderStatus provider,
+        DateTimeOffset now,
+        TimeSpan? activeProbeMaximumAge)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        return provider.ActiveProbeHealthy == true &&
+            IsActiveProbeObservationFresh(provider, now, activeProbeMaximumAge);
+    }
+
+    public static bool UsesFreshActiveProbeLatency(
+        ProviderStatus provider,
+        DateTimeOffset now,
+        TimeSpan? activeProbeMaximumAge)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        return HasFreshActiveProbeSuccess(provider, now, activeProbeMaximumAge) &&
+            IsKnownLatency(provider.ActiveProbeFirstTokenLatencyMs);
+    }
+
+    private static bool IsActiveProbeObservationFresh(
+        ProviderStatus provider,
+        DateTimeOffset now,
+        TimeSpan? activeProbeMaximumAge)
+    {
+        return activeProbeMaximumAge is { } maximumAge && maximumAge > TimeSpan.Zero &&
+            provider.ActiveProbeCheckedAt is { } checkedAt &&
+            now - checkedAt <= maximumAge;
+    }
+
+    public static ProviderStatus ResolveActiveProbeMetrics(
+        ProviderStatus provider,
+        DateTimeOffset now,
+        TimeSpan? activeProbeMaximumAge)
+    {
+        ArgumentNullException.ThrowIfNull(provider);
+        if (!UsesFreshActiveProbeLatency(provider, now, activeProbeMaximumAge))
+        {
+            return provider;
+        }
+
+        var latency = provider.ActiveProbeFirstTokenLatencyMs!.Value;
+        var latencyP90 = provider.ActiveProbeFirstTokenLatencyP90Ms is { } p90 && IsKnownLatency(p90)
+            ? p90
+            : latency;
+        return provider.WithFirstTokenLatency(latency, latencyP90);
+    }
 
     private static bool NearlyEqual(double left, double right) =>
         Math.Abs(left - right) <= 1e-12;

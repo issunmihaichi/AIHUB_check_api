@@ -38,6 +38,32 @@ internal static partial class CoreTestCases
             "Legacy route-candidate construction did not default evidence weight to one.");
     }
 
+    internal static void TestRoutingPublicModelsPreserveFourFieldCompatibility()
+    {
+        var blocklist = ProviderBlocklist.Empty;
+        var criteria = new RoutingCriteria(
+            "openai",
+            0.5,
+            RoutingEngine.DefaultMaximumStatusAge,
+            blocklist)
+        {
+            ActiveProbeMaximumAge = TimeSpan.FromSeconds(180)
+        };
+        var (platform, minimumSuccessRate6h, maximumStatusAge, deconstructedBlocklist) = criteria;
+        Assert(platform == "openai" &&
+            minimumSuccessRate6h == 0.5 &&
+            maximumStatusAge == RoutingEngine.DefaultMaximumStatusAge &&
+            ReferenceEquals(blocklist, deconstructedBlocklist),
+            "RoutingCriteria no longer supports its original four-field construction and deconstruction.");
+
+        var successRates = new Dictionary<string, double> { ["6h"] = 1 };
+        var warnings = new List<ProviderWarningReason>();
+        var first = new ProviderStatus { Id = "same", SuccessRates = successRates, WarningReasons = warnings };
+        var second = new ProviderStatus { Id = "same", SuccessRates = successRates, WarningReasons = warnings };
+        Assert(!first.Equals(second),
+            "ProviderStatus changed from reference identity to record value equality.");
+    }
+
     internal static void TestRoutingStatusAgeDefaultsToThirtyMinutes()
     {
         var expected = TimeSpan.FromMinutes(30);
@@ -74,20 +100,238 @@ internal static partial class CoreTestCases
     internal static void TestRoutingUsesLatestEvidenceTimestamp()
     {
         var now = new DateTimeOffset(2026, 7, 22, 9, 0, 0, TimeSpan.Zero);
+        var activeProbeTtl = TimeSpan.FromMinutes(60);
         var result = RoutingEngine.Evaluate(
             [
                 Provider(1, 0.01, true, 0.9, now, latency: 1_000),
                 Provider(2, 0.011, true, 0.9, now.AddMinutes(-60), latency: 500,
-                    activeProbeCheckedAt: now.AddMinutes(-45))
+                    activeProbeCheckedAt: now.AddMinutes(-45), activeProbeHealthy: true)
             ],
             [Group(1), Group(2)],
             new Dictionary<long, double>(),
-            Policy(RoutingMode.Speed),
+            Policy(RoutingMode.Speed) with { ActiveProbeMaximumAge = activeProbeTtl },
             now);
 
         var candidate = result.EligibleCandidates.Single(item => item.Group.Id == 2);
         Assert(Math.Abs(candidate.EvidenceWeight - (2d / 3d)) < 0.000001,
             "Routing did not use the latest of status and active-probe evidence timestamps.");
+
+        var disabled = RoutingEngine.Evaluate(
+            [
+                Provider(1, 0.01, true, 0.9, now, latency: 1_000),
+                Provider(2, 0.011, true, 0.9, now.AddMinutes(-60), latency: 500,
+                    activeProbeCheckedAt: now, activeProbeHealthy: true, activeProbeLatency: 100)
+            ],
+            [Group(1), Group(2)],
+            new Dictionary<long, double>(),
+            Policy(RoutingMode.Speed),
+            now);
+        Assert(disabled.EligibleCandidates.Single(item => item.Group.Id == 2).EvidenceWeight == 0.5,
+            "A disabled probe policy treated cached probe health as fresh evidence.");
+        Assert(disabled.EligibleCandidates.Single(item => item.Group.Id == 2).Provider.FirstTokenLatencyMs == 500,
+            "A disabled probe policy let cached local TTFT override provider data.");
+        Assert(!RoutingEngine.UsesFreshActiveProbeLatency(
+                disabled.EligibleCandidates.Single(item => item.Group.Id == 2).Provider,
+                now,
+                activeProbeMaximumAge: null),
+            "A disabled probe policy still labeled cached local TTFT as active.");
+    }
+
+    internal static void TestFreshActiveProbeFailureIsExcludedAtTtlBoundary()
+    {
+        var now = new DateTimeOffset(2026, 7, 24, 9, 0, 0, TimeSpan.Zero);
+        var ttl = TimeSpan.FromSeconds(180);
+        var failed = Provider(
+            1,
+            0.01,
+            true,
+            1,
+            now.AddHours(-1),
+            latency: 500,
+            activeProbeCheckedAt: now - ttl,
+            activeProbeHealthy: false);
+        var healthy = Provider(2, 0.02, true, 1, now, latency: 600);
+        var policy = Policy(RoutingMode.Economy) with { ActiveProbeMaximumAge = ttl };
+
+        var evaluation = RoutingEngine.Evaluate(
+            [failed, healthy],
+            [Group(1), Group(2)],
+            new Dictionary<long, double>(),
+            policy,
+            now);
+
+        Assert(evaluation.EligibleCandidates.Select(candidate => candidate.Group.Id).SequenceEqual([2L]),
+            "A probe failure at the TTL boundary remained route eligible.");
+        Assert(!ProviderStatusPresentation.IsRoutable(
+                failed,
+                hasAccountData: true,
+                isAuthorized: true,
+                effectiveMultiplier: failed.PriceMultiplier,
+                minimumSuccessRate6h: 0,
+                now,
+                RoutingEngine.DefaultMaximumStatusAge,
+                ttl),
+            "Presentation accepted a fresh probe failure rejected by routing.");
+        Assert(ProviderStatusPresentation.ResolveRoutingState(
+                failed,
+                hasAccountData: true,
+                isAuthorized: true,
+                effectiveMultiplier: failed.PriceMultiplier,
+                minimumSuccessRate6h: 0,
+                now,
+                RoutingEngine.DefaultMaximumStatusAge,
+                ttl) == "健康检查失败",
+            "Presentation did not identify the fresh probe failure safely.");
+        Assert(!RoutingEngine.UsesFreshActiveProbeLatency(failed, now, ttl),
+            "A fresh failed probe was labeled as usable local latency.");
+    }
+
+    internal static void TestExpiredActiveProbeFailureIsNeutral()
+    {
+        var now = new DateTimeOffset(2026, 7, 24, 9, 0, 0, TimeSpan.Zero);
+        var ttl = TimeSpan.FromSeconds(180);
+        var window = new ProviderMetricsRollingWindow();
+        window.Observe(
+            now - ttl - TimeSpan.FromTicks(2),
+            [Provider(1, 0.01, true, 1, now.AddMinutes(-60), latency: 2_000)],
+            new Dictionary<long, double>());
+        var expiredFailure = window.RecordActiveProbeObservations(
+        [
+            new ActiveProbeObservation("openai", 1, now - ttl - TimeSpan.FromTicks(2), true, 100),
+            new ActiveProbeObservation("openai", 1, now - ttl - TimeSpan.FromTicks(1), false)
+        ]).Providers.Single();
+        var policy = Policy(RoutingMode.Economy) with { ActiveProbeMaximumAge = ttl };
+
+        var evaluation = RoutingEngine.Evaluate(
+            [expiredFailure],
+            [Group(1)],
+            new Dictionary<long, double>(),
+            policy,
+            now);
+
+        Assert(evaluation.EligibleCandidates.Single().Group.Id == 1,
+            "An expired probe failure did not fall back to provider evidence.");
+        Assert(evaluation.EligibleCandidates.Single().Provider.FirstTokenLatencyMs == 2_000,
+            "An expired failure left an older successful local TTFT overriding provider data.");
+        Assert(ProviderStatusPresentation.IsRoutable(
+                expiredFailure,
+                hasAccountData: true,
+                isAuthorized: true,
+                effectiveMultiplier: expiredFailure.PriceMultiplier,
+                minimumSuccessRate6h: 0,
+                now,
+                RoutingEngine.DefaultMaximumStatusAge,
+                ttl),
+            "Presentation did not treat an expired probe failure as neutral.");
+        Assert(ProviderStatusPresentation.ResolveRoutingState(
+                expiredFailure,
+                hasAccountData: true,
+                isAuthorized: true,
+                effectiveMultiplier: expiredFailure.PriceMultiplier,
+                minimumSuccessRate6h: 0,
+                now,
+                RoutingEngine.DefaultMaximumStatusAge,
+                ttl) == "数据陈旧（已降权）",
+            "Expired failure freshness incorrectly refreshed stale provider evidence.");
+        Assert(!RoutingEngine.UsesFreshActiveProbeLatency(expiredFailure, now, ttl),
+            "An expired failed probe was labeled as usable local latency.");
+    }
+
+    internal static void TestFreshActiveProbeSuccessProvidesFreshnessEvidence()
+    {
+        var now = new DateTimeOffset(2026, 7, 24, 9, 0, 0, TimeSpan.Zero);
+        var ttl = TimeSpan.FromSeconds(180);
+        var provider = Provider(
+            1,
+            0.01,
+            true,
+            1,
+            checkedAt: null,
+            latency: null,
+            outputTps: null,
+            activeProbeCheckedAt: now - ttl,
+            activeProbeHealthy: true,
+            activeProbeLatency: 100);
+        var policy = Policy(RoutingMode.Economy) with { ActiveProbeMaximumAge = ttl };
+
+        var evaluation = RoutingEngine.Evaluate(
+            [provider],
+            [Group(1)],
+            new Dictionary<long, double>(),
+            policy,
+            now);
+
+        Assert(evaluation.EligibleCandidates.Single().EvidenceWeight == 1,
+            "A fresh successful probe was not usable freshness evidence.");
+        Assert(RoutingEngine.UsesFreshActiveProbeLatency(provider, now, ttl),
+            "A fresh successful local TTFT was not identified for presentation.");
+        Assert(ProviderStatusPresentation.IsRoutable(
+                provider,
+                hasAccountData: true,
+                isAuthorized: true,
+                effectiveMultiplier: provider.PriceMultiplier,
+                minimumSuccessRate6h: 0,
+                now,
+                RoutingEngine.DefaultMaximumStatusAge,
+                ttl),
+            "Presentation disagreed with fresh successful probe evidence.");
+
+        var expired = Provider(
+            1,
+            0.01,
+            true,
+            1,
+            checkedAt: null,
+            latency: null,
+            outputTps: null,
+            activeProbeCheckedAt: now - ttl - TimeSpan.FromTicks(1),
+            activeProbeHealthy: true,
+            activeProbeLatency: 100);
+        var expiredEvaluation = RoutingEngine.Evaluate(
+            [expired],
+            [Group(1)],
+            new Dictionary<long, double>(),
+            policy,
+            now);
+        Assert(expiredEvaluation.EligibleCandidates.Count == 0,
+            "An expired success timestamp remained freshness evidence without provider data.");
+        Assert(!RoutingEngine.UsesFreshActiveProbeLatency(expired, now, ttl),
+            "An expired successful probe was still labeled as usable local latency.");
+    }
+
+    internal static void TestExpiredActiveProbeSuccessRestoresProviderLatency()
+    {
+        var observedAt = new DateTimeOffset(2026, 7, 24, 9, 0, 0, TimeSpan.Zero);
+        var ttl = TimeSpan.FromSeconds(180);
+        var window = new ProviderMetricsRollingWindow();
+        window.Observe(
+            observedAt,
+            [Provider(1, 0.01, true, 1, observedAt, latency: 2_000, outputTps: 20)],
+            new Dictionary<long, double>());
+        var provider = window.RecordActiveProbeObservations(
+            [new ActiveProbeObservation("openai", 1, observedAt, true, 100)])
+            .Providers.Single();
+        var policy = Policy(RoutingMode.Economy) with { ActiveProbeMaximumAge = ttl };
+
+        var fresh = RoutingEngine.Evaluate(
+            [provider],
+            [Group(1)],
+            new Dictionary<long, double>(),
+            policy,
+            observedAt + ttl);
+        Assert(fresh.EligibleCandidates.Single().Provider.FirstTokenLatencyMs == 100,
+            "A successful probe at the TTL boundary did not override provider TTFT.");
+
+        var expired = RoutingEngine.Evaluate(
+            [provider],
+            [Group(1)],
+            new Dictionary<long, double>(),
+            policy,
+            observedAt + ttl + TimeSpan.FromTicks(1));
+        Assert(expired.EligibleCandidates.Single().Provider.FirstTokenLatencyMs == 2_000,
+            "Expired local TTFT continued to override the provider TTFT.");
+        Assert(!RoutingEngine.UsesFreshActiveProbeLatency(provider, observedAt + ttl + TimeSpan.FromTicks(1), ttl),
+            "Expired local TTFT remained marked as the active presentation source.");
     }
 
     internal static void TestStalePositiveBenefitsAreDownweighted()
@@ -210,6 +454,93 @@ internal static partial class CoreTestCases
             "A non-finite candidate success rate contributed to ranking.");
         Assert(Math.Abs(Evaluate(2, 1).CandidateScores[2] + 0.035) < 0.000001,
             "An out-of-range baseline success rate was not normalized before comparison.");
+    }
+
+    internal static void TestReliabilityEligibilityAndTieBreaksNormalizeRawRates()
+    {
+        var now = new DateTimeOffset(2026, 7, 24, 9, 0, 0, TimeSpan.Zero);
+        var thresholdPolicy = Policy(RoutingMode.Economy) with { MinimumSuccessRate6h = 0.5 };
+        var thresholdEvaluation = RoutingEngine.Evaluate(
+            [
+                Provider(1, 0.01, true, double.NaN, now),
+                Provider(2, 0.02, true, double.PositiveInfinity, now),
+                Provider(3, 0.03, true, 2, now),
+                Provider(4, 0.04, true, 0.75, now),
+                Provider(5, 0.005, true, -1, now)
+            ],
+            [Group(1), Group(2), Group(3), Group(4), Group(5)],
+            new Dictionary<long, double>(),
+            thresholdPolicy,
+            now);
+        Assert(thresholdEvaluation.EligibleCandidates.Select(candidate => candidate.Group.Id).SequenceEqual([3L, 4L]),
+            "Non-finite reliability bypassed the threshold or finite out-of-range reliability was not clamped.");
+
+        var duplicateGroup = RoutingEngine.Evaluate(
+            [
+                Provider(1, 0.01, true, double.PositiveInfinity, now, id: "invalid"),
+                Provider(1, 0.01, true, 0.9, now, id: "valid")
+            ],
+            [Group(1)],
+            new Dictionary<long, double>(),
+            Policy(RoutingMode.Economy),
+            now);
+        Assert(duplicateGroup.EligibleCandidates.Single().Provider.Id == "valid",
+            "A non-finite raw success rate won a duplicate-group tie-break.");
+
+        var cheapest = RoutingEngine.SelectCheapest(
+            [
+                Provider(1, 0.01, true, double.NaN, now),
+                Provider(2, 0.02, true, 0.75, now)
+            ],
+            [Group(1), Group(2)],
+            new Dictionary<long, double>(),
+            new RoutingCriteria("openai", 0.5, RoutingEngine.DefaultMaximumStatusAge),
+            now);
+        Assert(cheapest?.Group.Id == 2,
+            "SelectCheapest let non-finite reliability bypass the threshold.");
+
+        var cheapestDuplicate = RoutingEngine.SelectCheapest(
+            [
+                Provider(1, 0.01, true, double.PositiveInfinity, now, id: "invalid"),
+                Provider(1, 0.01, true, 0.9, now, id: "valid")
+            ],
+            [Group(1)],
+            new Dictionary<long, double>(),
+            Criteria(),
+            now);
+        Assert(cheapestDuplicate?.Provider.Id == "valid",
+            "SelectCheapest let non-finite reliability win a tie-break.");
+
+        var invalid = Provider(5, 0.01, true, double.NaN, now);
+        Assert(!ProviderStatusPresentation.IsRoutable(
+                invalid,
+                hasAccountData: true,
+                isAuthorized: true,
+                effectiveMultiplier: invalid.PriceMultiplier,
+                minimumSuccessRate6h: 0.5,
+                now,
+                RoutingEngine.DefaultMaximumStatusAge),
+            "Presentation let non-finite reliability bypass the threshold.");
+        Assert(ProviderStatusPresentation.ResolveRoutingState(
+                invalid,
+                hasAccountData: true,
+                isAuthorized: true,
+                effectiveMultiplier: invalid.PriceMultiplier,
+                minimumSuccessRate6h: 0.5,
+                now,
+                RoutingEngine.DefaultMaximumStatusAge) == "低于阈值",
+            "Presentation did not normalize reliability consistently with routing.");
+
+        var aboveOne = Provider(6, 0.01, true, 2, now);
+        Assert(ProviderStatusPresentation.IsRoutable(
+                aboveOne,
+                hasAccountData: true,
+                isAuthorized: true,
+                effectiveMultiplier: aboveOne.PriceMultiplier,
+                minimumSuccessRate6h: 1,
+                now,
+                RoutingEngine.DefaultMaximumStatusAge),
+            "Presentation did not clamp finite reliability above one.");
     }
 
     internal static void TestSelectivePolicyPreservesLocalWeights()

@@ -16,6 +16,9 @@ public sealed class MonitorSummary
 
 public sealed class ProviderStatus
 {
+    private double? _firstTokenLatencyMs;
+    private double? _firstTokenLatencyP90Ms;
+
     [JsonPropertyName("id")]
     public string Id { get; init; } = string.Empty;
 
@@ -47,13 +50,21 @@ public sealed class ProviderStatus
     public DateTimeOffset? LastCallAt { get; init; }
 
     [JsonPropertyName("firstTokenLatencyMs")]
-    public double? FirstTokenLatencyMs { get; init; }
+    public double? FirstTokenLatencyMs
+    {
+        get => _firstTokenLatencyMs;
+        init => _firstTokenLatencyMs = value;
+    }
 
     [JsonPropertyName("outputTokensPerSecond")]
     public double? OutputTokensPerSecond { get; init; }
 
     [JsonIgnore]
-    public double? FirstTokenLatencyP90Ms { get; init; }
+    public double? FirstTokenLatencyP90Ms
+    {
+        get => _firstTokenLatencyP90Ms;
+        init => _firstTokenLatencyP90Ms = value;
+    }
 
     [JsonIgnore]
     public double? OutputTokensPerSecondP25 { get; init; }
@@ -63,6 +74,12 @@ public sealed class ProviderStatus
 
     [JsonIgnore]
     public double? ActiveProbeFirstTokenLatencyMs { get; init; }
+
+    [JsonIgnore]
+    public double? ActiveProbeFirstTokenLatencyP90Ms { get; init; }
+
+    [JsonIgnore]
+    public bool? ActiveProbeHealthy { get; init; }
 
     [JsonIgnore]
     public DateTimeOffset? ActiveProbeCheckedAt { get; init; }
@@ -84,6 +101,14 @@ public sealed class ProviderStatus
     public bool HasWarnings => WarningReasons is { Count: > 0 };
 
     public DateTimeOffset? ResolvedLastCallEndedAt => LastCallEndedAt ?? LastCallAt;
+
+    internal ProviderStatus WithFirstTokenLatency(double latency, double latencyP90)
+    {
+        var clone = (ProviderStatus)MemberwiseClone();
+        clone._firstTokenLatencyMs = latency;
+        clone._firstTokenLatencyP90Ms = latencyP90;
+        return clone;
+    }
 }
 
 public sealed class ProviderWarningReason
@@ -159,7 +184,10 @@ public sealed record RoutingCriteria(
     string Platform,
     double MinimumSuccessRate6h,
     TimeSpan MaximumStatusAge,
-    ProviderBlocklist? Blocklist = null);
+    ProviderBlocklist? Blocklist = null)
+{
+    public TimeSpan? ActiveProbeMaximumAge { get; init; }
+}
 
 public sealed record RouteCandidate(
     ProviderStatus Provider,
@@ -209,6 +237,7 @@ public sealed record BalancedRoutingPolicy
     public RoutingMode Mode { get; init; } = RoutingMode.Economy;
     public double MinimumSuccessRate6h { get; init; } = 0;
     public TimeSpan MaximumStatusAge { get; init; } = RoutingEngine.DefaultMaximumStatusAge;
+    public TimeSpan? ActiveProbeMaximumAge { get; init; }
     public ProviderBlocklist Blocklist { get; init; } = ProviderBlocklist.Empty;
 
     public double PriceWeight => Mode switch
@@ -236,6 +265,11 @@ public sealed record BalancedRoutingPolicy
         if (MaximumStatusAge <= TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException(nameof(MaximumStatusAge));
+        }
+
+        if (ActiveProbeMaximumAge is { } activeProbeMaximumAge && activeProbeMaximumAge <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(ActiveProbeMaximumAge));
         }
 
         if (!double.IsFinite(PriceWeight) || PriceWeight is <= 0 or >= 1)

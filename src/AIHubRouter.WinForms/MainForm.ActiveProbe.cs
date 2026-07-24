@@ -147,6 +147,7 @@ internal sealed partial class MainForm
                     configuration!,
                     cancellation.Token);
                 cancellation.Token.ThrowIfCancellationRequested();
+                ApplyActiveProbeObservation(configuration!, result, DateTimeOffset.UtcNow);
                 var status = result.Success && result.Measurement is { } measurement
                     ? $"Key {configuration!.TestKeyId} 存活，当前分组 {result.GroupId}，首 Token {measurement.FirstTokenLatencyMs:0} ms。"
                     : $"Key {configuration!.TestKeyId} 健康检查失败（当前分组 {result.GroupId}）。";
@@ -176,6 +177,42 @@ internal sealed partial class MainForm
             {
                 UpdateActiveProbeTimer();
             }
+        }
+    }
+
+    private TimeSpan? CurrentActiveProbeMaximumAge() =>
+        PersistentAppSettings.ResolveActiveProbeMaximumAge(
+            _activeProbeCheck.Checked,
+            _activeProbeTimer.Interval / 1000);
+
+    private void ApplyActiveProbeObservation(
+        ActiveProbeConfiguration configuration,
+        ActiveProbeResult result,
+        DateTimeOffset failureObservedAt)
+    {
+        var observation = result.Success && result.Measurement is { } measurement
+            ? new ActiveProbeObservation(
+                configuration.Platform,
+                result.GroupId,
+                measurement.ObservedAt,
+                Success: true,
+                measurement.FirstTokenLatencyMs)
+            : new ActiveProbeObservation(
+                configuration.Platform,
+                result.GroupId,
+                failureObservedAt,
+                Success: false);
+        var metrics = _providerMetrics.RecordActiveProbeObservations([observation]);
+        if (_summary is { } summary)
+        {
+            _summary = new MonitorSummary
+            {
+                Apis = metrics.Providers.ToList(),
+                GeneratedAt = summary.GeneratedAt,
+                MonitoringActive = summary.MonitoringActive
+            };
+            _userRates = metrics.UserGroupRates;
+            RecalculateCandidate();
         }
     }
 

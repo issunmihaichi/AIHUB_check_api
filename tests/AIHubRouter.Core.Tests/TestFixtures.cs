@@ -29,7 +29,10 @@ internal static class TestFixtures
         DateTimeOffset? lastCallAt = null,
         string? id = null,
         DateTimeOffset? activeProbeCheckedAt = null,
-        bool includeSuccess = true)
+        bool includeSuccess = true,
+        bool? activeProbeHealthy = null,
+        int activeProbeSampleCount = 0,
+        double? activeProbeLatency = null)
     {
         return new ProviderStatus
         {
@@ -41,7 +44,10 @@ internal static class TestFixtures
             Available = available,
             Enabled = enabled,
             CheckedAt = checkedAt,
+            ActiveProbeHealthy = activeProbeHealthy,
             ActiveProbeCheckedAt = activeProbeCheckedAt,
+            ActiveProbeSampleCount = activeProbeSampleCount,
+            ActiveProbeFirstTokenLatencyMs = activeProbeLatency,
             LastCallEndedAt = lastCallEndedAt,
             LastCallAt = lastCallAt,
             FirstTokenLatencyMs = latency,
