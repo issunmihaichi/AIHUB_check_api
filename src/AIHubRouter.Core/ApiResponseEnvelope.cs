@@ -176,7 +176,9 @@ internal static class ApiResponseEnvelope
 
     private static string? ResolveApiCode(JsonElement root, bool includeTopStatus = false)
     {
-        if (TryGetProperty(root, "error", out var error) && error.ValueKind == JsonValueKind.Object)
+        var hasErrorObject =
+            TryGetProperty(root, "error", out var error) && error.ValueKind == JsonValueKind.Object;
+        if (hasErrorObject)
         {
             if (TryGetProperty(error, "code", out var nestedCode))
             {
@@ -186,11 +188,22 @@ internal static class ApiResponseEnvelope
                     return value;
                 }
             }
+        }
 
-            if (TryGetProperty(error, "status", out var nestedStatus) && !IsSuccessScalar(nestedStatus))
+        if (TryGetProperty(root, "code", out var failureCode) && !IsSuccessScalar(failureCode))
+        {
+            var value = ReadScalar(failureCode);
+            if (!string.IsNullOrWhiteSpace(value))
             {
-                return ReadScalar(nestedStatus);
+                return value;
             }
+        }
+
+        if (hasErrorObject &&
+            TryGetProperty(error, "status", out var nestedStatus) &&
+            !IsSuccessScalar(nestedStatus))
+        {
+            return ReadScalar(nestedStatus);
         }
 
         if (includeTopStatus && TryGetProperty(root, "status", out var status))

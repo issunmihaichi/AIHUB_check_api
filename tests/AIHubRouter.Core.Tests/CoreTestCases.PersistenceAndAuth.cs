@@ -395,6 +395,34 @@ internal static partial class CoreTestCases
         Assert(session.AccessToken == "access-login", "Login fallback session was not returned.");
     }
 
+    internal static void TestHttp200SpecificFailureCodeFallsBackToLogin()
+    {
+        var handler = new StubHttpMessageHandler(_ => JsonResponse("""
+            {"code":"invalid_token","status":"error","error":{"status":"error"},"data":null}
+            """));
+        using var client = new AIHubClient("https://example.test", messageHandler: handler);
+        var loginCalls = 0;
+        var coordinator = new SessionCoordinator(
+            client.RefreshSessionAsync,
+            (credentials, cancellationToken) =>
+            {
+                loginCalls++;
+                return Task.FromResult(new AuthSession(
+                    "access-login",
+                    "refresh-login",
+                    DateTimeOffset.UtcNow.AddHours(1)));
+            },
+            (session, cancellationToken) => Task.CompletedTask);
+
+        var session = coordinator.GetSessionAsync(
+            new AuthSession("access-expired", "refresh-rejected", DateTimeOffset.MinValue),
+            new LoginCredentials("user@example.test", "password"),
+            CancellationToken.None).GetAwaiter().GetResult();
+
+        Assert(loginCalls == 1, "Specific failure code did not trigger login fallback.");
+        Assert(session.AccessToken == "access-login", "Login fallback session was not returned.");
+    }
+
     internal static void TestAuthenticationApiCodeIsClassified()
     {
         var exception = new AIHubApiException("Synthetic auth failure.", HttpStatusCode.OK, "401");

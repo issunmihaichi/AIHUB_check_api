@@ -140,6 +140,7 @@ internal static class TestCatalog
         new TestCase("Refresh API code falls back to login", CoreTestCases.TestRefreshApiCodeFallsBackToLogin),
         new TestCase("HTTP 200 failure status overrides success code", CoreTestCases.TestHttp200FailureStatusOverridesSuccessCode),
         new TestCase("HTTP 200 failure status falls back to login", CoreTestCases.TestHttp200FailureStatusFallsBackToLogin),
+        new TestCase("HTTP 200 specific failure code falls back to login", CoreTestCases.TestHttp200SpecificFailureCodeFallsBackToLogin),
         new TestCase("Refresh network failure does not log in", CoreTestCases.TestRefreshNetworkFailureDoesNotLogIn),
         new TestCase("Authentication API code is classified", CoreTestCases.TestAuthenticationApiCodeIsClassified),
         new TestCase("Login endpoint maps session", CoreTestCases.TestLoginEndpointMapsSession),
