@@ -317,6 +317,97 @@ internal static partial class CoreTestCases
             "A timeout while restoring the test Key was reported as an ordinary cancellation.");
     }
 
+    internal static void TestActiveProbeCycleRejectsUnconfirmedForwardMove()
+    {
+        var now = new DateTimeOffset(2026, 7, 24, 12, 10, 0, TimeSpan.Zero);
+        var responseKinds = new[] { "null", "wrong-key", "wrong-group" };
+
+        foreach (var responseKind in responseKinds)
+        {
+            using var cancellation = new CancellationTokenSource();
+            var operations = new List<(long GroupId, bool CanBeCanceled)>();
+            var upstreamCalls = 0;
+            var account = new StubRoutingClient(now)
+            {
+                ProvidersOverride = [Provider(2, 0.01, true, 1, now)],
+                GroupsOverride = [Group(1), Group(2)],
+                AfterRemoteKeyGroupUpdate = (_, groupId, token) =>
+                    operations.Add((groupId, token.CanBeCanceled)),
+                RemoteKeyGroupUpdateResult = (keyId, groupId, updated) => groupId == 2
+                    ? CreateUnconfirmedKeyMoveResponse(responseKind, keyId, groupId)
+                    : updated
+            };
+            var service = new ActiveProviderProbeService(
+                new StubUpstreamProbeClient(request =>
+                {
+                    upstreamCalls++;
+                    return Task.FromResult(new ActiveProbeMeasurement(
+                        request.Platform,
+                        request.GroupId,
+                        now,
+                        100));
+                }),
+                () => now);
+
+            var failure = CaptureException(() => service.RunCycleAsync(
+                    account,
+                    new ActiveProbeConfiguration(
+                        "https://example.test", "probe-key-value", "probe-model", 10, "openai"),
+                    account.ProvidersOverride,
+                    account.GroupsOverride,
+                    ProviderBlocklist.Empty,
+                    cancellation.Token)
+                .GetAwaiter()
+                .GetResult());
+
+            Assert(failure is InvalidOperationException and not ActiveProbeRestoreException,
+                $"The cycle's {responseKind} forward response did not propagate as a control-plane failure.");
+            Assert(upstreamCalls == 0 && operations.SequenceEqual(new[]
+                {
+                    (2L, true),
+                    (1L, false)
+                }),
+                $"The cycle's {responseKind} forward response reached upstream or was not safely restored.");
+        }
+    }
+
+    internal static void TestActiveProbeCycleRejectsUnconfirmedRestore()
+    {
+        var now = new DateTimeOffset(2026, 7, 24, 12, 11, 0, TimeSpan.Zero);
+        var responseKinds = new[] { "null", "wrong-key", "wrong-group" };
+
+        foreach (var responseKind in responseKinds)
+        {
+            var account = new StubRoutingClient(now)
+            {
+                ProvidersOverride = [Provider(2, 0.01, true, 1, now)],
+                GroupsOverride = [Group(1), Group(2)],
+                RemoteKeyGroupUpdateResult = (keyId, groupId, updated) => groupId == 1
+                    ? CreateUnconfirmedKeyMoveResponse(responseKind, keyId, groupId)
+                    : updated
+            };
+            var service = new ActiveProviderProbeService(
+                new StubUpstreamProbeClient(request => Task.FromResult(
+                    new ActiveProbeMeasurement(request.Platform, request.GroupId, now, 100))),
+                () => now);
+
+            var failure = CaptureException(() => service.RunCycleAsync(
+                    account,
+                    new ActiveProbeConfiguration(
+                        "https://example.test", "probe-key-value", "probe-model", 10, "openai"),
+                    account.ProvidersOverride,
+                    account.GroupsOverride,
+                    ProviderBlocklist.Empty)
+                .GetAwaiter()
+                .GetResult());
+
+            Assert(failure is ActiveProbeRestoreException { InnerException: InvalidOperationException },
+                $"The cycle's {responseKind} restore response was not surfaced as ActiveProbeRestoreException.");
+            Assert(account.UpdatedGroupIds.SequenceEqual(new long[] { 2, 1 }),
+                $"The cycle's {responseKind} restore response changed the expected move ordering.");
+        }
+    }
+
     internal static void TestActiveProbeMetricsPreserveReportedLatency()
     {
         var now = new DateTimeOffset(2026, 7, 23, 8, 0, 0, TimeSpan.Zero);
@@ -947,6 +1038,27 @@ internal static partial class CoreTestCases
 
         throw new InvalidOperationException("The invalid probe response was accepted as successful.");
     }
+
+    private static ApiKeyInfo? CreateUnconfirmedKeyMoveResponse(
+        string responseKind,
+        long keyId,
+        long groupId) => responseKind switch
+        {
+            "null" => null,
+            "wrong-key" => new ApiKeyInfo
+            {
+                Id = keyId + 1,
+                Status = "active",
+                GroupId = groupId
+            },
+            "wrong-group" => new ApiKeyInfo
+            {
+                Id = keyId,
+                Status = "active",
+                GroupId = groupId + 1
+            },
+            _ => throw new InvalidOperationException("Unknown malformed response test case.")
+        };
 
     private static void AssertThrows<TException>(Action action, string message)
         where TException : Exception

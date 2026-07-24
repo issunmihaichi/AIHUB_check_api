@@ -134,6 +134,7 @@ internal sealed class StubRoutingClient(DateTimeOffset now) : IAIHubApiClient
     public IReadOnlyList<ProviderStatus>? ProvidersOverride { get; init; }
     public IReadOnlyList<GroupInfo>? GroupsOverride { get; init; }
     public Action<long, long, CancellationToken>? AfterRemoteKeyGroupUpdate { get; init; }
+    public Func<long, long, ApiKeyInfo, ApiKeyInfo?>? RemoteKeyGroupUpdateResult { get; init; }
 
     public Task<MonitorSummary> GetProviderSummaryAsync(CancellationToken cancellationToken = default)
     {
@@ -208,14 +209,20 @@ internal sealed class StubRoutingClient(DateTimeOffset now) : IAIHubApiClient
             throw new InvalidOperationException("synthetic update failure");
         }
 
-        return Task.FromResult(new ApiKeyInfo
+        var updated = new ApiKeyInfo
         {
             Id = keyId,
             Name = $"Synthetic Key {keyId}",
             Status = "active",
             GroupId = groupId,
             Group = GroupForStub(groupId)
-        });
+        };
+        if (RemoteKeyGroupUpdateResult is { } updateResult)
+        {
+            return Task.FromResult(updateResult(keyId, groupId, updated)!);
+        }
+
+        return Task.FromResult(updated);
     }
 
     private static ProviderStatus ProviderForStub(long groupId, DateTimeOffset checkedAt) => new()

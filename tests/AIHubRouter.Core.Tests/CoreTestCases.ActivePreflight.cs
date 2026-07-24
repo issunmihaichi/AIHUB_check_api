@@ -247,6 +247,109 @@ internal static partial class CoreTestCases
             "A restore failure wrote a business Key or persisted an unconfirmed route state.");
     }
 
+    internal static void TestRoutingPreflightRejectsUnconfirmedForwardMove()
+    {
+        var now = new DateTimeOffset(2026, 7, 24, 13, 27, 0, TimeSpan.Zero);
+        var responseKinds = new[] { "null", "wrong-key", "wrong-group" };
+
+        foreach (var responseKind in responseKinds)
+        {
+            using var cancellation = new CancellationTokenSource();
+            var operations = new List<(long KeyId, long GroupId, bool CanBeCanceled)>();
+            var stateStore = new RecordingRouteStateStore();
+            var metrics = new ProviderMetricsRollingWindow();
+            var account = CreateSingleTargetAccount(
+                now,
+                (keyId, groupId, token) => operations.Add((keyId, groupId, token.CanBeCanceled)));
+            account.UpdateResult = (keyId, groupId, updated) => groupId == 2
+                ? CreateUnconfirmedKeyMoveResponse(responseKind, keyId, groupId)
+                : updated;
+            var upstream = new TrackingUpstreamProbeClient((request, _) => Task.FromResult(
+                new ActiveProbeMeasurement(request.Platform, request.GroupId, now, 100)));
+            using var service = new RoutingService(
+                ActivePreflightSettings(),
+                ActivePreflightCredentials(),
+                stateStore,
+                new StubRoutingClientFactory(account),
+                utcNow: () => now,
+                providerMetrics: metrics,
+                upstreamProbeFactory: () => upstream);
+
+            var failure = CaptureException(() => service.RunOnceAsync(cancellationToken: cancellation.Token)
+                .GetAwaiter()
+                .GetResult());
+            var provider = metrics.RecordActiveProbeObservations([]).Providers.Single();
+
+            Assert(failure is InvalidOperationException and not ActiveProbeRestoreException,
+                $"The {responseKind} forward response did not propagate as a control-plane failure.");
+            Assert(upstream.Requests.Count == 0,
+                $"The {responseKind} forward response reached the upstream probe.");
+            Assert(operations.SequenceEqual(new[]
+                {
+                    (99L, 2L, true),
+                    (99L, 1L, false)
+                }),
+                $"The {responseKind} forward response was not followed by a non-cancelable restore only.");
+            Assert(stateStore.SaveCalls == 0 && provider.ActiveProbeHealthy is null,
+                $"The {responseKind} forward response persisted route state or recorded node health.");
+        }
+    }
+
+    internal static void TestRoutingPreflightRejectsUnconfirmedRestore()
+    {
+        var now = new DateTimeOffset(2026, 7, 24, 13, 28, 0, TimeSpan.Zero);
+        var responseKinds = new[] { "null", "wrong-key", "wrong-group" };
+
+        foreach (var responseKind in responseKinds)
+        {
+            using var cancellation = new CancellationTokenSource();
+            var operations = new List<string>();
+            var stateStore = new RecordingRouteStateStore();
+            var metrics = new ProviderMetricsRollingWindow();
+            var account = CreateSingleTargetAccount(
+                now,
+                (keyId, groupId, token) =>
+                    operations.Add($"key:{keyId}:{groupId}:{token.CanBeCanceled}"));
+            account.UpdateResult = (keyId, groupId, updated) => groupId == 1
+                ? CreateUnconfirmedKeyMoveResponse(responseKind, keyId, groupId)
+                : updated;
+            var upstream = new TrackingUpstreamProbeClient((request, _) =>
+            {
+                operations.Add($"probe:{request.GroupId}");
+                return Task.FromResult(new ActiveProbeMeasurement(
+                    request.Platform,
+                    request.GroupId,
+                    now,
+                    100));
+            });
+            using var service = new RoutingService(
+                ActivePreflightSettings(),
+                ActivePreflightCredentials(),
+                stateStore,
+                new StubRoutingClientFactory(account),
+                utcNow: () => now,
+                providerMetrics: metrics,
+                upstreamProbeFactory: () => upstream);
+
+            var failure = CaptureException(() => service.RunOnceAsync(cancellationToken: cancellation.Token)
+                .GetAwaiter()
+                .GetResult());
+            var provider = metrics.RecordActiveProbeObservations([]).Providers.Single();
+
+            Assert(failure is ActiveProbeRestoreException { InnerException: InvalidOperationException },
+                $"The {responseKind} restore response was not surfaced as ActiveProbeRestoreException.");
+            Assert(operations.SequenceEqual(new[]
+                {
+                    "key:99:2:True",
+                    "probe:2",
+                    "key:99:1:False"
+                }),
+                $"The {responseKind} restore response was followed by a business write or used the caller token.");
+            Assert(stateStore.SaveCalls == 0 && provider.ActiveProbeHealthy is null,
+                $"The {responseKind} restore response persisted route state or recorded node health.");
+        }
+    }
+
     internal static void TestRoutingPreflightCancellationRestoresWithoutHealthFailure()
     {
         var now = new DateTimeOffset(2026, 7, 24, 13, 30, 0, TimeSpan.Zero);
@@ -759,6 +862,7 @@ internal sealed class PreflightRoutingClient(
 
     public Action<long, long, CancellationToken>? AfterUpdate { get; init; }
     public Func<int, Exception?>? GetKeysFailure { get; set; }
+    public Func<long, long, ApiKeyInfo, ApiKeyInfo?>? UpdateResult { get; set; }
 
     public Task<MonitorSummary> GetProviderSummaryAsync(CancellationToken cancellationToken = default) =>
         Task.FromResult(new MonitorSummary { Apis = providers.ToList() });
@@ -806,6 +910,11 @@ internal sealed class PreflightRoutingClient(
             Group = groups.FirstOrDefault(group => group.Id == groupId)
         };
         _keys[_keys.IndexOf(current)] = updated;
+        if (UpdateResult is { } updateResult)
+        {
+            return Task.FromResult(updateResult(keyId, groupId, updated)!);
+        }
+
         return Task.FromResult(updated);
     }
 

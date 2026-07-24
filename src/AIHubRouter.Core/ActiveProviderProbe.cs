@@ -509,7 +509,11 @@ public sealed class ActiveProviderProbeService
                 remoteGroupMayHaveChanged = true;
                 try
                 {
-                    await accountClient.UpdateKeyGroupAsync(testKey.Id, targetGroupId, cancellationToken);
+                    var updatedKey = await accountClient.UpdateKeyGroupAsync(
+                        testKey.Id,
+                        targetGroupId,
+                        cancellationToken);
+                    ConfirmKeyGroupUpdate(updatedKey, testKey.Id, targetGroupId);
                 }
                 catch (AIHubApiException exception) when (exception.IsAuthenticationFailure)
                 {
@@ -565,7 +569,11 @@ public sealed class ActiveProviderProbeService
             {
                 try
                 {
-                    await accountClient.UpdateKeyGroupAsync(testKey.Id, originalGroupId, CancellationToken.None);
+                    var restoredKey = await accountClient.UpdateKeyGroupAsync(
+                        testKey.Id,
+                        originalGroupId,
+                        CancellationToken.None);
+                    ConfirmKeyGroupUpdate(restoredKey, testKey.Id, originalGroupId);
                 }
                 catch (Exception exception)
                 {
@@ -615,7 +623,11 @@ public sealed class ActiveProviderProbeService
                 if (currentGroupId != group.Id)
                 {
                     remoteGroupMayHaveChanged = true;
-                    await accountClient.UpdateKeyGroupAsync(testKey.Id, group.Id, cancellationToken);
+                    var updatedKey = await accountClient.UpdateKeyGroupAsync(
+                        testKey.Id,
+                        group.Id,
+                        cancellationToken);
+                    ConfirmKeyGroupUpdate(updatedKey, testKey.Id, group.Id);
                     currentGroupId = group.Id;
                     remoteGroupMayHaveChanged = false;
                 }
@@ -651,7 +663,11 @@ public sealed class ActiveProviderProbeService
             {
                 try
                 {
-                    await accountClient.UpdateKeyGroupAsync(testKey.Id, originalGroupId, CancellationToken.None);
+                    var restoredKey = await accountClient.UpdateKeyGroupAsync(
+                        testKey.Id,
+                        originalGroupId,
+                        CancellationToken.None);
+                    ConfirmKeyGroupUpdate(restoredKey, testKey.Id, originalGroupId);
                 }
                 catch (Exception exception)
                 {
@@ -663,6 +679,15 @@ public sealed class ActiveProviderProbeService
         }
 
         return new ActiveProbeCycleResult(results, restored);
+    }
+
+    private static void ConfirmKeyGroupUpdate(ApiKeyInfo? updatedKey, long keyId, long groupId)
+    {
+        if (updatedKey is null || updatedKey.Id != keyId || updatedKey.GroupId != groupId)
+        {
+            throw new InvalidOperationException(
+                "The dedicated active-probe Key group update could not be confirmed.");
+        }
     }
 
     private static bool TryGetRecoverableProbeDetail(
