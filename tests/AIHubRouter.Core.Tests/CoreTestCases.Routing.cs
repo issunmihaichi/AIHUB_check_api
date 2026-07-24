@@ -1145,17 +1145,26 @@ internal static partial class CoreTestCases
         var api = new StubRoutingClient(now) { TwoKeys = true };
         var settings = new PersistentAppSettings
         {
+            BaseUrl = "https://example.test",
             KeySelectionInitialized = true,
             SelectedKeyIds = [10, 11],
             ActiveProbeEnabled = true,
-            ActiveProbeKeyId = 10
+            ActiveProbeKeyId = 10,
+            ActiveProbeModel = "probe-model"
         };
+        var upstream = new StubUpstreamProbeClient(request => Task.FromResult(
+            new ActiveProbeMeasurement(request.Platform, request.GroupId, now, 100)));
         using var service = new RoutingService(
             settings,
-            new PersistentCredentials { BearerToken = "synthetic-access" },
+            new PersistentCredentials
+            {
+                BearerToken = "synthetic-access",
+                ActiveProbeApiKey = "probe-key-value"
+            },
             new MemoryRouteStateStore(),
             new StubRoutingClientFactory(api),
-            utcNow: () => now);
+            utcNow: () => now,
+            upstreamProbeFactory: () => upstream);
 
         var result = service.RunOnceAsync().GetAwaiter().GetResult();
 
@@ -1163,7 +1172,8 @@ internal static partial class CoreTestCases
             "The dedicated active-probe Key was included in normal routing.");
         Assert(result.KeyResults.Count == 1 && result.KeyResults[0].KeyId == 11,
             "Routing attempted to update the dedicated active-probe Key.");
-        Assert(api.UpdateCalls == 1, "The remaining route Key was not updated.");
+        Assert(api.UpdatedGroupIds.SequenceEqual(new long[] { 2, 1, 2 }),
+            "The dedicated probe Key was not restored before the remaining route Key was updated.");
     }
 
 }

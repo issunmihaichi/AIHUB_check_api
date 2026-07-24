@@ -476,6 +476,105 @@ public sealed class ActiveProviderProbeService
         }
     }
 
+    public async Task<ActiveProbeResult> ProbeTargetAsync(
+        IAIHubApiClient accountClient,
+        ActiveProbeConfiguration configuration,
+        long targetGroupId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(accountClient);
+        ArgumentNullException.ThrowIfNull(configuration);
+        configuration.Validate();
+        if (targetGroupId <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(targetGroupId));
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        var keys = await accountClient.GetAllKeysAsync(cancellationToken);
+        var testKey = keys.SingleOrDefault(key => key.Id == configuration.TestKeyId);
+        if (testKey is null ||
+            !testKey.Status.Equals("active", StringComparison.OrdinalIgnoreCase) ||
+            testKey.GroupId is not { } originalGroupId)
+        {
+            throw new InvalidOperationException("The dedicated active-probe Key is not an active routed Key.");
+        }
+
+        var currentGroupId = originalGroupId;
+        var remoteGroupMayHaveChanged = false;
+        try
+        {
+            if (currentGroupId != targetGroupId)
+            {
+                remoteGroupMayHaveChanged = true;
+                try
+                {
+                    await accountClient.UpdateKeyGroupAsync(testKey.Id, targetGroupId, cancellationToken);
+                }
+                catch (AIHubApiException exception) when (exception.IsAuthenticationFailure)
+                {
+                    // An account-auth rejection cannot have changed the remote Key group.
+                    remoteGroupMayHaveChanged = false;
+                    throw;
+                }
+
+                currentGroupId = targetGroupId;
+                remoteGroupMayHaveChanged = false;
+            }
+
+            try
+            {
+                var measurement = await _upstream.ProbeAsync(
+                    new ActiveProbeRequest(
+                        configuration.BaseUrl,
+                        configuration.ApiKey,
+                        configuration.Model,
+                        configuration.Platform,
+                        targetGroupId),
+                    cancellationToken);
+                measurement.Validate();
+                if (measurement.GroupId != targetGroupId ||
+                    !string.Equals(
+                        measurement.Platform.Trim(),
+                        configuration.Platform.Trim(),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException("The active probe returned an unexpected target identity.");
+                }
+
+                return new ActiveProbeResult(
+                    targetGroupId,
+                    true,
+                    measurement with { ObservedAt = _utcNow() },
+                    "ok");
+            }
+            catch (Exception exception)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!TryGetRecoverableProbeDetail(exception, cancellationToken, out var detail))
+                {
+                    throw;
+                }
+
+                return new ActiveProbeResult(targetGroupId, false, null, detail);
+            }
+        }
+        finally
+        {
+            if (remoteGroupMayHaveChanged || currentGroupId != originalGroupId)
+            {
+                try
+                {
+                    await accountClient.UpdateKeyGroupAsync(testKey.Id, originalGroupId, CancellationToken.None);
+                }
+                catch (Exception exception)
+                {
+                    throw new ActiveProbeRestoreException(exception);
+                }
+            }
+        }
+    }
+
     public async Task<ActiveProbeCycleResult> RunCycleAsync(
         IAIHubApiClient accountClient,
         ActiveProbeConfiguration configuration,

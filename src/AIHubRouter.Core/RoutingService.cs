@@ -38,6 +38,7 @@ public sealed class RoutingService : IDisposable
     private readonly Func<PersistentCredentials, CancellationToken, Task>? _persistCredentials;
     private readonly Func<DateTimeOffset> _utcNow;
     private readonly ProviderMetricsRollingWindow _providerMetrics;
+    private readonly Func<IUpstreamProbeClient> _upstreamProbeFactory;
     private PersistentCredentials _credentials;
     private AuthSession? _currentSession;
     private IAIHubApiClient? _sessionClient;
@@ -55,7 +56,8 @@ public sealed class RoutingService : IDisposable
         IAIHubClientFactory? clientFactory = null,
         Func<PersistentCredentials, CancellationToken, Task>? persistCredentials = null,
         Func<DateTimeOffset>? utcNow = null,
-        ProviderMetricsRollingWindow? providerMetrics = null)
+        ProviderMetricsRollingWindow? providerMetrics = null,
+        Func<IUpstreamProbeClient>? upstreamProbeFactory = null)
     {
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
         _credentials = credentials ?? throw new ArgumentNullException(nameof(credentials));
@@ -64,6 +66,7 @@ public sealed class RoutingService : IDisposable
         _persistCredentials = persistCredentials;
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
         _providerMetrics = providerMetrics ?? new ProviderMetricsRollingWindow();
+        _upstreamProbeFactory = upstreamProbeFactory ?? (() => new OpenAiStreamingProbeClient());
 
         if (!string.IsNullOrWhiteSpace(credentials.BearerToken) ||
             !string.IsNullOrWhiteSpace(credentials.RefreshToken))
@@ -144,6 +147,78 @@ public sealed class RoutingService : IDisposable
         var evaluation = snapshot.Evaluation;
         var decisionResult = snapshot.Result;
         var keyResults = new List<KeyRouteResult>();
+
+        if (_settings.ActiveProbeEnabled &&
+            !dryRun &&
+            decisionResult.Decision.Target is { } preflightTarget &&
+            selectedKeys.Any(key => key.GroupId != preflightTarget.Group.Id) &&
+            !HasFreshTargetProbeSuccess(
+                preflightTarget.Provider,
+                now,
+                basePolicy.ActiveProbeMaximumAge))
+        {
+            var configuration = new ActiveProbeConfiguration(
+                _settings.BaseUrl,
+                _credentials.ActiveProbeApiKey,
+                _settings.ActiveProbeModel,
+                _settings.ActiveProbeKeyId ?? 0,
+                _settings.Platform);
+            configuration.Validate();
+
+            using var upstream = _upstreamProbeFactory();
+            var probeService = new ActiveProviderProbeService(upstream, _utcNow);
+            var attemptedGroupIds = new HashSet<long>();
+            var excludedGroupIds = new HashSet<long>();
+            while (decisionResult.Decision.Target is { } candidate &&
+                selectedKeys.Any(key => key.GroupId != candidate.Group.Id) &&
+                !HasFreshTargetProbeSuccess(
+                    candidate.Provider,
+                    now,
+                    basePolicy.ActiveProbeMaximumAge))
+            {
+                if (!attemptedGroupIds.Add(candidate.Group.Id))
+                {
+                    excludedGroupIds.Add(candidate.Group.Id);
+                }
+                else
+                {
+                    var probeResult = await probeService.ProbeTargetAsync(
+                        client,
+                        configuration,
+                        candidate.Group.Id,
+                        cancellationToken);
+                    if (probeResult.Success && probeResult.Measurement is { } measurement)
+                    {
+                        metrics = _providerMetrics.RecordActiveProbes([measurement]);
+                    }
+                    else
+                    {
+                        metrics = _providerMetrics.RecordActiveProbeObservations(
+                            [new ActiveProbeObservation(
+                                configuration.Platform,
+                                candidate.Group.Id,
+                                _utcNow(),
+                                Success: false)]);
+                        excludedGroupIds.Add(candidate.Group.Id);
+                    }
+                }
+
+                var preflightPolicy = CreatePreflightPolicy(basePolicy, excludedGroupIds);
+                snapshot = RouteDecisionCoordinator.Evaluate(
+                    metrics.Providers,
+                    _cachedGroups,
+                    metrics.UserGroupRates,
+                    preflightPolicy,
+                    _settings.DurationCategory,
+                    state,
+                    now,
+                    observedCurrentGroupId: observedGroupId,
+                    balancedDeadlineSoftSeconds: _settings.BalancedDeadlineSoftSeconds,
+                    balancedExpectedOutputTokens: _settings.BalancedExpectedOutputTokens);
+                evaluation = snapshot.Evaluation;
+                decisionResult = snapshot.Result;
+            }
+        }
 
         if (decisionResult.Decision.Target is { } target)
         {
@@ -231,6 +306,29 @@ public sealed class RoutingService : IDisposable
     {
         var groups = keys.Select(key => key.GroupId).Where(groupId => groupId is > 0).Distinct().ToArray();
         return groups.Length == 1 ? groups[0] : null;
+    }
+
+    private static bool HasFreshTargetProbeSuccess(
+        ProviderStatus provider,
+        DateTimeOffset now,
+        TimeSpan? maximumAge) =>
+        RoutingEngine.HasFreshActiveProbeSuccess(provider, now, maximumAge);
+
+    private static BalancedRoutingPolicy CreatePreflightPolicy(
+        BalancedRoutingPolicy basePolicy,
+        IReadOnlySet<long> excludedGroupIds)
+    {
+        if (excludedGroupIds.Count == 0)
+        {
+            return basePolicy;
+        }
+
+        return basePolicy with
+        {
+            Blocklist = new ProviderBlocklist(
+                basePolicy.Blocklist.BlockedGroupIds.Concat(excludedGroupIds),
+                basePolicy.Blocklist.BlockedNodePatterns)
+        };
     }
 
     private void ReplaceCachedKey(ApiKeyInfo updated)

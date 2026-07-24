@@ -93,6 +93,69 @@ internal static partial class CoreTestCases
             "A failed selected-Key health check changed the selected Key's group.");
     }
 
+    internal static void TestActiveProbeTargetsThenRestoresDedicatedKey()
+    {
+        var now = new DateTimeOffset(2026, 7, 24, 12, 0, 0, TimeSpan.Zero);
+        using var cancellation = new CancellationTokenSource();
+        var operations = new List<string>();
+        var account = new StubRoutingClient(now)
+        {
+            AfterRemoteKeyGroupUpdate = (keyId, groupId, token) =>
+                operations.Add($"key:{keyId}:{groupId}:{token.CanBeCanceled}")
+        };
+        var upstream = new StubUpstreamProbeClient(request =>
+        {
+            operations.Add($"probe:{request.GroupId}");
+            return Task.FromResult(new ActiveProbeMeasurement(
+                request.Platform,
+                request.GroupId,
+                now,
+                125));
+        });
+        var service = new ActiveProviderProbeService(upstream, () => now);
+
+        var result = service.ProbeTargetAsync(
+                account,
+                new ActiveProbeConfiguration(
+                    "https://example.test", "probe-key-value", "probe-model", 10, "openai"),
+                2,
+                cancellation.Token)
+            .GetAwaiter()
+            .GetResult();
+
+        Assert(result.Success && result.GroupId == 2 && result.Measurement?.FirstTokenLatencyMs == 125,
+            "The target probe did not return its successful first-token measurement.");
+        Assert(operations.SequenceEqual(new[]
+            {
+                "key:10:2:True",
+                "probe:2",
+                "key:10:1:False"
+            }),
+            "The dedicated probe Key was not moved, probed, and restored in order with a non-cancelable restore.");
+    }
+
+    internal static void TestActiveProbeRejectsMismatchedMeasurementIdentity()
+    {
+        var now = new DateTimeOffset(2026, 7, 24, 12, 5, 0, TimeSpan.Zero);
+        var account = new StubRoutingClient(now);
+        var upstream = new StubUpstreamProbeClient(_ => Task.FromResult(
+            new ActiveProbeMeasurement("anthropic", 99, now, 100)));
+        var service = new ActiveProviderProbeService(upstream, () => now);
+
+        var failure = CaptureException(() => service.ProbeTargetAsync(
+                account,
+                new ActiveProbeConfiguration(
+                    "https://example.test", "probe-key-value", "probe-model", 10, "openai"),
+                2)
+            .GetAwaiter()
+            .GetResult());
+
+        Assert(failure is InvalidOperationException && failure is not ActiveProbeRestoreException,
+            "A measurement for a different platform/group was accepted as target health.");
+        Assert(account.UpdatedGroupIds.SequenceEqual(new long[] { 2, 1 }),
+            "A mismatched upstream measurement did not restore the dedicated Key.");
+    }
+
     internal static void TestActiveProbeRestoresTestKeyAfterCycle()
     {
         var now = new DateTimeOffset(2026, 7, 23, 8, 0, 0, TimeSpan.Zero);
