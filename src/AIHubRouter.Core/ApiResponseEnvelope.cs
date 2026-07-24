@@ -193,14 +193,14 @@ internal static class ApiResponseEnvelope
             }
         }
 
-        if (TryGetProperty(root, "code", out var code))
-        {
-            return ReadScalar(code);
-        }
-
         if (includeTopStatus && TryGetProperty(root, "status", out var status))
         {
             return ReadScalar(status);
+        }
+
+        if (TryGetProperty(root, "code", out var code))
+        {
+            return ReadScalar(code);
         }
 
         return null;

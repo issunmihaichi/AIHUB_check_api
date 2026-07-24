@@ -346,6 +346,55 @@ internal static partial class CoreTestCases
         Assert(session.AccessToken == "access-login", "Login fallback session was not returned.");
     }
 
+    internal static void TestHttp200FailureStatusOverridesSuccessCode()
+    {
+        var handler = new StubHttpMessageHandler(_ => JsonResponse("""
+            {"code":0,"status":"invalid_token","data":null}
+            """));
+        using var client = new AIHubClient("https://example.test", messageHandler: handler);
+
+        try
+        {
+            client.RefreshSessionAsync("refresh-rejected", CancellationToken.None).GetAwaiter().GetResult();
+            throw new InvalidOperationException("Conflicting HTTP 200 authentication failure was accepted.");
+        }
+        catch (AIHubApiException exception)
+        {
+            Assert(exception.ApiCode == "invalid_token",
+                "Failing status did not override the successful API code.");
+            Assert(exception.IsAuthenticationFailure,
+                "Failing authentication status was not classified for session recovery.");
+        }
+    }
+
+    internal static void TestHttp200FailureStatusFallsBackToLogin()
+    {
+        var handler = new StubHttpMessageHandler(_ => JsonResponse("""
+            {"code":0,"status":"invalid_token","data":null}
+            """));
+        using var client = new AIHubClient("https://example.test", messageHandler: handler);
+        var loginCalls = 0;
+        var coordinator = new SessionCoordinator(
+            client.RefreshSessionAsync,
+            (credentials, cancellationToken) =>
+            {
+                loginCalls++;
+                return Task.FromResult(new AuthSession(
+                    "access-login",
+                    "refresh-login",
+                    DateTimeOffset.UtcNow.AddHours(1)));
+            },
+            (session, cancellationToken) => Task.CompletedTask);
+
+        var session = coordinator.GetSessionAsync(
+            new AuthSession("access-expired", "refresh-rejected", DateTimeOffset.MinValue),
+            new LoginCredentials("user@example.test", "password"),
+            CancellationToken.None).GetAwaiter().GetResult();
+
+        Assert(loginCalls == 1, "Failing HTTP 200 status did not trigger login fallback.");
+        Assert(session.AccessToken == "access-login", "Login fallback session was not returned.");
+    }
+
     internal static void TestAuthenticationApiCodeIsClassified()
     {
         var exception = new AIHubApiException("Synthetic auth failure.", HttpStatusCode.OK, "401");
