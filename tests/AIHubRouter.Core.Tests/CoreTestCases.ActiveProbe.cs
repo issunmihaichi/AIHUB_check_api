@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using AIHubRouter.Core;
 using static AIHubRouter.Core.Tests.TestFixtures;
 
@@ -365,6 +366,9 @@ internal static partial class CoreTestCases
         AssertThrows<ArgumentException>(
             () => new ActiveProbeObservation("openai", 1, DateTimeOffset.UtcNow, false, 1).Validate(),
             "A failed observation was allowed to carry fake TTFT data.");
+        AssertThrows<ArgumentException>(
+            () => new ActiveProbeObservation("openai", 1, DateTimeOffset.UtcNow, true).Validate(),
+            "A successful observation without TTFT data was accepted.");
     }
 
     internal static void TestActiveProbePolicyTtlUsesConfiguredInterval()
@@ -402,8 +406,8 @@ internal static partial class CoreTestCases
                 "application/json")
         });
 
-        Assert(exception.ApiCode == "invalid_api_key",
-            "The safe API code was not retained from an HTTP 200 JSON error.");
+        Assert(exception.ApiCode is null,
+            "A credential-shaped API code was retained from an HTTP 200 JSON error.");
         Assert(!exception.Message.Contains(sensitiveDetail, StringComparison.Ordinal),
             "The structured probe exception leaked an upstream error message.");
     }
@@ -458,6 +462,194 @@ internal static partial class CoreTestCases
         });
         Assert(jsonException.ApiCode is null,
             "Malformed JSON invented an API error code.");
+    }
+
+    internal static void TestActiveProbeProtocolExceptionRedactsCredentialShapedCodes()
+    {
+        Assert(new ActiveProbeProtocolException("upstream_failed").ApiCode == "upstream_failed",
+            "A safe upstream failure code was suppressed.");
+
+        foreach (var credentialShapedCode in new[]
+                 {
+                     "sk-synthetic-placeholder",
+                     "bearer-synthetic-placeholder",
+                     "eyJheader.eyJpayload.synthetic-signature",
+                     "invalid_api_key",
+                     "synthetic_token_failure",
+                     "synthetic_secret_failure",
+                     "password_rejected",
+                     "credential_rejected"
+                 })
+        {
+            var exception = new ActiveProbeProtocolException(credentialShapedCode);
+            Assert(exception.ApiCode is null,
+                "A credential-shaped API code was exposed by the probe protocol exception.");
+        }
+    }
+
+    internal static void TestActiveProbeNonSuccessHttpResponsePreservesStatusAndRedactsBody()
+    {
+        const string sensitiveBody = "sensitive-upstream-response-body";
+        using var probe = new OpenAiStreamingProbeClient(
+            new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable)
+            {
+                Content = new StringContent(sensitiveBody, Encoding.UTF8, "text/plain")
+            }));
+
+        var exception = CaptureException(() => probe.ProbeAsync(
+                new ActiveProbeRequest("https://example.test", "probe-key-value", "probe-model", "openai", 1),
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult());
+
+        Assert(exception is HttpRequestException { StatusCode: HttpStatusCode.ServiceUnavailable },
+            "A non-success probe response did not preserve its HTTP status code.");
+        Assert(!exception.Message.Contains(sensitiveBody, StringComparison.Ordinal),
+            "A non-success probe response leaked its body through the exception message.");
+    }
+
+    internal static void TestActiveProbeServiceReturnsSanitizedRecoverableDetails()
+    {
+        var now = new DateTimeOffset(2026, 7, 24, 10, 0, 0, TimeSpan.Zero);
+        var account = new StubRoutingClient(now);
+        var configuration = new ActiveProbeConfiguration(
+            "https://example.test", "probe-key-value", "probe-model", 10, "openai");
+
+        var statusResult = new ActiveProviderProbeService(
+                new StubUpstreamProbeClient(_ => Task.FromException<ActiveProbeMeasurement>(
+                    new HttpRequestException("sensitive", null, HttpStatusCode.TooManyRequests))),
+                () => now)
+            .CheckSelectedKeyAsync(account, configuration)
+            .GetAwaiter()
+            .GetResult();
+        Assert(!statusResult.Success && statusResult.Detail == "http-429",
+            "A recoverable HTTP probe failure did not expose only its safe status detail.");
+
+        var transportResult = new ActiveProviderProbeService(
+                new StubUpstreamProbeClient(_ => Task.FromException<ActiveProbeMeasurement>(
+                    new HttpRequestException("synthetic transport failure"))),
+                () => now)
+            .CheckSelectedKeyAsync(account, configuration)
+            .GetAwaiter()
+            .GetResult();
+        Assert(!transportResult.Success && transportResult.Detail == "probe-failed",
+            "A status-less transport failure did not receive the generic probe detail.");
+
+        var codeResult = new ActiveProviderProbeService(
+                new StubUpstreamProbeClient(_ => Task.FromException<ActiveProbeMeasurement>(
+                    new ActiveProbeProtocolException("upstream_failed"))),
+                () => now)
+            .CheckSelectedKeyAsync(account, configuration)
+            .GetAwaiter()
+            .GetResult();
+        Assert(!codeResult.Success && codeResult.Detail == "api:upstream_failed",
+            "A recoverable safe API code was not retained in the probe result detail.");
+
+        var redactedResult = new ActiveProviderProbeService(
+                new StubUpstreamProbeClient(_ => Task.FromException<ActiveProbeMeasurement>(
+                    new ActiveProbeProtocolException("sk-synthetic-placeholder"))),
+                () => now)
+            .CheckSelectedKeyAsync(account, configuration)
+            .GetAwaiter()
+            .GetResult();
+        Assert(!redactedResult.Success && redactedResult.Detail == "probe-failed",
+            "A credential-shaped API code was exposed in a failed probe result.");
+    }
+
+    internal static void TestActiveProbeServicePropagatesGlobalFailures()
+    {
+        var now = new DateTimeOffset(2026, 7, 24, 10, 0, 0, TimeSpan.Zero);
+        var configuration = new ActiveProbeConfiguration(
+            "https://example.test", "probe-key-value", "probe-model", 10, "openai");
+        var globalFailures = new Exception[]
+        {
+            new HttpRequestException("unauthorized", null, HttpStatusCode.Unauthorized),
+            new HttpRequestException("forbidden", null, HttpStatusCode.Forbidden),
+            new ActiveProbeProtocolException("invalid_api_key"),
+            new ActiveProbeProtocolException("authentication_error"),
+            new ActiveProbeProtocolException("unauthorized"),
+            new ActiveProbeProtocolException("forbidden"),
+            new ActiveProbeProtocolException("model_not_found"),
+            new ActiveProbeProtocolException("invalid_model")
+        };
+
+        foreach (var globalFailure in globalFailures)
+        {
+            var selectedFailure = CaptureException(() => new ActiveProviderProbeService(
+                    new StubUpstreamProbeClient(_ => Task.FromException<ActiveProbeMeasurement>(globalFailure)),
+                    () => now)
+                .CheckSelectedKeyAsync(new StubRoutingClient(now), configuration)
+                .GetAwaiter()
+                .GetResult());
+            Assert(ReferenceEquals(selectedFailure, globalFailure),
+                "A global selected-Key probe failure was converted to a node result.");
+
+            var account = new StubRoutingClient(now)
+            {
+                ProvidersOverride = [Provider(2, 0.01, true, 1, now)],
+                GroupsOverride = [Group(1), Group(2)]
+            };
+            var cycleFailure = CaptureException(() => new ActiveProviderProbeService(
+                    new StubUpstreamProbeClient(_ => Task.FromException<ActiveProbeMeasurement>(globalFailure)),
+                    () => now)
+                .RunCycleAsync(account, configuration, account.ProvidersOverride, account.GroupsOverride, ProviderBlocklist.Empty)
+                .GetAwaiter()
+                .GetResult());
+            Assert(ReferenceEquals(cycleFailure, globalFailure),
+                "A global cycle probe failure was converted to a node result.");
+        }
+    }
+
+    internal static void TestActiveProbeServicePropagatesAccountFailuresAndCancellation()
+    {
+        var now = new DateTimeOffset(2026, 7, 24, 10, 0, 0, TimeSpan.Zero);
+        var configuration = new ActiveProbeConfiguration(
+            "https://example.test", "probe-key-value", "probe-model", 10, "openai");
+        var upstream = new StubUpstreamProbeClient(_ =>
+            Task.FromResult(new ActiveProbeMeasurement("openai", 2, now, 100)));
+
+        var keyReadFailure = new InvalidOperationException("synthetic key read failure");
+        var selectedFailure = CaptureException(() => new ActiveProviderProbeService(upstream, () => now)
+            .CheckSelectedKeyAsync(new ThrowingActiveProbeAccountClient(keyReadFailure, null), configuration)
+            .GetAwaiter()
+            .GetResult());
+        Assert(ReferenceEquals(selectedFailure, keyReadFailure),
+            "A selected-Key account failure was converted to a node result.");
+
+        var cycleReadFailure = new InvalidOperationException("synthetic cycle key read failure");
+        var cycleReadException = CaptureException(() => new ActiveProviderProbeService(upstream, () => now)
+            .RunCycleAsync(
+                new ThrowingActiveProbeAccountClient(cycleReadFailure, null),
+                configuration,
+                [Provider(2, 0.01, true, 1, now)],
+                [Group(1), Group(2)],
+                ProviderBlocklist.Empty)
+            .GetAwaiter()
+            .GetResult());
+        Assert(ReferenceEquals(cycleReadException, cycleReadFailure),
+            "A cycle key-read failure was converted to a node result.");
+
+        var updateFailure = new InvalidOperationException("synthetic key update failure");
+        var cycleUpdateException = CaptureException(() => new ActiveProviderProbeService(upstream, () => now)
+            .RunCycleAsync(
+                new ThrowingActiveProbeAccountClient(null, updateFailure),
+                configuration,
+                [Provider(2, 0.01, true, 1, now)],
+                [Group(1), Group(2)],
+                ProviderBlocklist.Empty)
+            .GetAwaiter()
+            .GetResult());
+        Assert(ReferenceEquals(cycleUpdateException, updateFailure),
+            "A cycle key-group update failure was converted to a node result.");
+
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var canceled = CaptureException(() => new ActiveProviderProbeService(upstream, () => now)
+            .CheckSelectedKeyAsync(new StubRoutingClient(now), configuration, cancellation.Token)
+            .GetAwaiter()
+            .GetResult());
+        Assert(canceled is OperationCanceledException,
+            "A caller cancellation was converted to a selected-Key node result.");
     }
 
     internal static void TestActiveProbeKeyPersistsOnlyInCredentials()
@@ -568,6 +760,20 @@ internal static partial class CoreTestCases
 
         throw new InvalidOperationException(message);
     }
+
+    private static Exception CaptureException(Action action)
+    {
+        try
+        {
+            action();
+        }
+        catch (Exception exception)
+        {
+            return exception;
+        }
+
+        throw new InvalidOperationException("The operation completed without the expected failure.");
+    }
 }
 
 internal sealed class StubUpstreamProbeClient(
@@ -575,6 +781,54 @@ internal sealed class StubUpstreamProbeClient(
 {
     public Task<ActiveProbeMeasurement> ProbeAsync(ActiveProbeRequest request, CancellationToken cancellationToken) =>
         responder(request);
+
+    public void Dispose()
+    {
+    }
+}
+
+internal sealed class ThrowingActiveProbeAccountClient(Exception? getKeysFailure, Exception? updateFailure) : IAIHubApiClient
+{
+    private int _updateCalls;
+
+    public Task<MonitorSummary> GetProviderSummaryAsync(CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException();
+
+    public Task<JsonElement> ValidateLoginAsync(CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException();
+
+    public Task<AuthSession> LoginAsync(LoginCredentials credentials, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException();
+
+    public Task<AuthSession> RefreshSessionAsync(string refreshToken, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException();
+
+    public Task<IReadOnlyList<GroupInfo>> GetAvailableGroupsAsync(CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException();
+
+    public Task<IReadOnlyDictionary<long, double>> GetUserGroupRatesAsync(CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException();
+
+    public Task<IReadOnlyList<ApiKeyInfo>> GetAllKeysAsync(CancellationToken cancellationToken = default)
+    {
+        if (getKeysFailure is not null)
+        {
+            throw getKeysFailure;
+        }
+
+        return Task.FromResult<IReadOnlyList<ApiKeyInfo>>(
+        [new ApiKeyInfo { Id = 10, Status = "active", GroupId = 1 }]);
+    }
+
+    public Task<ApiKeyInfo> UpdateKeyGroupAsync(long keyId, long groupId, CancellationToken cancellationToken = default)
+    {
+        if (updateFailure is not null && _updateCalls++ == 0)
+        {
+            throw updateFailure;
+        }
+
+        return Task.FromResult(new ApiKeyInfo { Id = keyId, Status = "active", GroupId = groupId });
+    }
 
     public void Dispose()
     {

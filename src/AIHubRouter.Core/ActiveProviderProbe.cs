@@ -53,6 +53,13 @@ public sealed record ActiveProbeObservation(
             throw new ArgumentOutOfRangeException(nameof(FirstTokenLatencyMs));
         }
 
+        if (Success && FirstTokenLatencyMs is null)
+        {
+            throw new ArgumentException(
+                "A successful active-probe observation requires TTFT data.",
+                nameof(FirstTokenLatencyMs));
+        }
+
         if (!Success && FirstTokenLatencyMs is not null)
         {
             throw new ArgumentException(
@@ -119,20 +126,67 @@ public sealed class ActiveProbeProtocolException : InvalidOperationException
         : base("The active probe received an invalid or failed upstream response.")
     {
         ApiCode = NormalizeApiCode(apiCode);
+        IsGlobalConfigurationFailure = IsGlobalConfigurationCode(apiCode);
     }
 
     public string? ApiCode { get; }
+
+    public string Detail => ApiCode is { } apiCode ? $"api:{apiCode}" : "probe-failed";
+
+    public bool IsGlobalConfigurationFailure { get; }
 
     private static string? NormalizeApiCode(string? apiCode)
     {
         var value = apiCode?.Trim();
         if (string.IsNullOrEmpty(value) || value.Length > 64 ||
-            value.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not '_' and not '-' and not '.'))
+            value.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not '_' and not '-' and not '.') ||
+            IsCredentialShapedCode(value))
         {
             return null;
         }
 
-        return value;
+        return value.ToLowerInvariant();
+    }
+
+    private static bool IsCredentialShapedCode(string value)
+    {
+        if (value.StartsWith("sk-", StringComparison.OrdinalIgnoreCase) ||
+            value.StartsWith("bearer", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (value.Contains("key", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("token", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("secret", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("password", StringComparison.OrdinalIgnoreCase) ||
+            value.Contains("credential", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var parts = value.Split('.');
+        return parts.Length == 3 && parts.All(part =>
+            part.Length > 0 && part.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_'));
+    }
+
+    private static bool IsGlobalConfigurationCode(string? apiCode)
+    {
+        if (string.IsNullOrWhiteSpace(apiCode))
+        {
+            return false;
+        }
+
+        return apiCode.Trim().Replace('-', '_').ToLowerInvariant() switch
+        {
+            "invalid_api_key" or
+            "authentication_error" or
+            "unauthorized" or
+            "forbidden" or
+            "model_not_found" or
+            "invalid_model" => true,
+            _ => false
+        };
     }
 }
 
@@ -204,7 +258,10 @@ public sealed class OpenAiStreamingProbeClient : IUpstreamProbeClient
             cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
-            throw new HttpRequestException($"Active probe request failed with HTTP {(int)response.StatusCode}.");
+            throw new HttpRequestException(
+                $"Active probe request failed with HTTP {(int)response.StatusCode}.",
+                inner: null,
+                response.StatusCode);
         }
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
@@ -348,6 +405,7 @@ public sealed class ActiveProviderProbeService
         ArgumentNullException.ThrowIfNull(accountClient);
         ArgumentNullException.ThrowIfNull(configuration);
         configuration.Validate();
+        cancellationToken.ThrowIfCancellationRequested();
 
         var keys = await accountClient.GetAllKeysAsync(cancellationToken);
         var testKey = keys.SingleOrDefault(key => key.Id == configuration.TestKeyId);
@@ -373,13 +431,9 @@ public sealed class ActiveProviderProbeService
                 measurement with { ObservedAt = _utcNow() },
                 "ok");
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (Exception exception) when (TryGetRecoverableProbeDetail(exception, cancellationToken, out var detail))
         {
-            throw;
-        }
-        catch
-        {
-            return new ActiveProbeResult(groupId, false, null, "probe-failed");
+            return new ActiveProbeResult(groupId, false, null, detail);
         }
     }
 
@@ -396,6 +450,7 @@ public sealed class ActiveProviderProbeService
         ArgumentNullException.ThrowIfNull(providers);
         ArgumentNullException.ThrowIfNull(groups);
         configuration.Validate();
+        cancellationToken.ThrowIfCancellationRequested();
 
         var selectedGroups = SelectProbeGroups(providers, groups, configuration.Platform, blocklist).ToArray();
         if (selectedGroups.Length == 0)
@@ -419,16 +474,16 @@ public sealed class ActiveProviderProbeService
             foreach (var group in selectedGroups)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (currentGroupId != group.Id)
+                {
+                    remoteGroupMayHaveChanged = true;
+                    await accountClient.UpdateKeyGroupAsync(testKey.Id, group.Id, cancellationToken);
+                    currentGroupId = group.Id;
+                    remoteGroupMayHaveChanged = false;
+                }
+
                 try
                 {
-                    if (currentGroupId != group.Id)
-                    {
-                        remoteGroupMayHaveChanged = true;
-                        await accountClient.UpdateKeyGroupAsync(testKey.Id, group.Id, cancellationToken);
-                        currentGroupId = group.Id;
-                        remoteGroupMayHaveChanged = false;
-                    }
-
                     var measurement = await _upstream.ProbeAsync(
                         new ActiveProbeRequest(
                             configuration.BaseUrl,
@@ -440,13 +495,9 @@ public sealed class ActiveProviderProbeService
                     measurement.Validate();
                     results.Add(new ActiveProbeResult(group.Id, true, measurement with { ObservedAt = _utcNow() }, "ok"));
                 }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                catch (Exception exception) when (TryGetRecoverableProbeDetail(exception, cancellationToken, out var detail))
                 {
-                    throw;
-                }
-                catch
-                {
-                    results.Add(new ActiveProbeResult(group.Id, false, null, "probe-failed"));
+                    results.Add(new ActiveProbeResult(group.Id, false, null, detail));
                 }
             }
         }
@@ -468,6 +519,38 @@ public sealed class ActiveProviderProbeService
         }
 
         return new ActiveProbeCycleResult(results, restored);
+    }
+
+    private static bool TryGetRecoverableProbeDetail(
+        Exception exception,
+        CancellationToken cancellationToken,
+        out string detail)
+    {
+        if (exception is OperationCanceledException && cancellationToken.IsCancellationRequested)
+        {
+            detail = string.Empty;
+            return false;
+        }
+
+        if (exception is HttpRequestException { StatusCode: HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden })
+        {
+            detail = string.Empty;
+            return false;
+        }
+
+        if (exception is ActiveProbeProtocolException { IsGlobalConfigurationFailure: true })
+        {
+            detail = string.Empty;
+            return false;
+        }
+
+        detail = exception switch
+        {
+            HttpRequestException { StatusCode: { } statusCode } => $"http-{(int)statusCode}",
+            ActiveProbeProtocolException protocolException => protocolException.Detail,
+            _ => "probe-failed"
+        };
+        return true;
     }
 
     private static IEnumerable<GroupInfo> SelectProbeGroups(
