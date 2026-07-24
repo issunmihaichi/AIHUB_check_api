@@ -126,7 +126,7 @@ internal static class TestCatalog
         new TestCase("First Token keeps stale provider eligible", CoreTestCases.TestFirstTokenKeepsStaleProviderEligible),
         new TestCase("Stale First Token candidates participate in ranking", CoreTestCases.TestStaleFirstTokenCandidatesParticipateInRanking),
         new TestCase("Forced group overrides policy until unavailable", CoreTestCases.TestForcedGroupOverridesRoutingPolicyUntilUnavailable),
-        new TestCase("Releasing forced group resets policy observation", CoreTestCases.TestReleasingForcedGroupResetsPolicyObservation),
+        new TestCase("Releasing forced group preserves policy dwell baseline", CoreTestCases.TestReleasingForcedGroupPreservesPolicyDwellBaseline),
         new TestCase("Economy remains strict during frequent calls", CoreTestCases.TestFrequentCallsOverrideEconomy),
         new TestCase("Idle calls override speed with cost", CoreTestCases.TestIdleCallsOverrideSpeed),
         new TestCase("Adaptive rejection keeps current group", CoreTestCases.TestAdaptiveRejectionKeepsCurrentGroup),

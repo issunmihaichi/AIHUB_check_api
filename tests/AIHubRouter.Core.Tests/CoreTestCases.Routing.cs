@@ -708,7 +708,7 @@ internal static partial class CoreTestCases
             "An unavailable forced group was not cleared before normal recovery.");
     }
 
-    internal static void TestReleasingForcedGroupResetsPolicyObservation()
+    internal static void TestReleasingForcedGroupPreservesPolicyDwellBaseline()
     {
         var state = new RouteState
         {
@@ -723,12 +723,12 @@ internal static partial class CoreTestCases
         var released = state.ReleaseForcedGroup();
 
         Assert(released.ForcedGroupId is null &&
-            released.LastPolicySwitchAt is null &&
+            released.LastPolicySwitchAt == state.LastPolicySwitchAt &&
             released.CompletedPolicyEvaluationsSinceLastSwitch == 0 &&
             released.PendingPolicyTargetGroupId is null &&
             released.PendingPolicyTargetObservations == 0 &&
             released.CurrentGroupId == state.CurrentGroupId,
-            "Releasing a forced group did not reset policy observations while preserving the current route.");
+            "Releasing a forced group did not reset candidate observations while preserving the policy dwell baseline.");
     }
 
     internal static void TestFrequentCallsOverrideEconomy()
@@ -848,7 +848,12 @@ internal static partial class CoreTestCases
         var result = RouteDecisionEngine.Decide(evaluation, new RouteState(), Policy(RoutingMode.Economy), now);
         Assert(result.Decision.ShouldSwitch && result.Decision.Reason == RouteDecisionReason.InitialRoute,
             "Initial route was not explained as an initial route.");
-        Assert(result.NextState.CurrentGroupId == 2, "Initial route state did not target the recommendation.");
+        Assert(result.NextState.CurrentGroupId == 2 &&
+            result.NextState.LastPolicySwitchAt == now &&
+            result.NextState.CompletedPolicyEvaluationsSinceLastSwitch == 0 &&
+            result.NextState.PendingPolicyTargetGroupId is null &&
+            result.NextState.PendingPolicyTargetObservations == 0,
+            "Initial route did not establish a clean policy-hysteresis baseline.");
     }
 
     internal static void TestWeightedSpeedWinnerSwitchesImmediately()

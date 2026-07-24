@@ -379,7 +379,6 @@ public sealed record RouteState
     public RouteState ReleaseForcedGroup() => this with
     {
         ForcedGroupId = null,
-        LastPolicySwitchAt = null,
         CompletedPolicyEvaluationsSinceLastSwitch = 0,
         PendingPolicyTargetGroupId = null,
         PendingPolicyTargetObservations = 0

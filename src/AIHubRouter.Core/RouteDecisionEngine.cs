@@ -576,7 +576,8 @@ public static class RouteDecisionEngine
         long targetGroupId,
         DateTimeOffset now,
         RouteSwitchClass switchClass) =>
-        switchClass is RouteSwitchClass.Policy or RouteSwitchClass.ForcedRecovery or RouteSwitchClass.ManualOverride
+        switchClass is RouteSwitchClass.Initial or RouteSwitchClass.Policy or
+            RouteSwitchClass.ForcedRecovery or RouteSwitchClass.ManualOverride
             ? state with
             {
                 CurrentGroupId = targetGroupId,
