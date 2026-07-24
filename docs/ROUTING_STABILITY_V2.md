@@ -9,7 +9,7 @@
 
 ## Policy Hysteresis
 
-Every normal Policy transition requires all of the following:
+Every normal Policy transition with an initialized hysteresis baseline requires all of the following:
 
 1. At least 30 seconds have elapsed.
 2. At least six completed routing evaluations are already recorded in state.
@@ -17,9 +17,9 @@ Every normal Policy transition requires all of the following:
 
 The current proposal is evaluated against the previously recorded state. The first two consecutive proposals for a new target record observations one and two; the next proposal for that same target can switch, so stable switching normally occurs on the third proposal. A different target or no proposed switch resets the pending-target observations.
 
-`Initial`, `ForcedRecovery`, and `ManualOverride` execute immediately without these gates. Policy, recovery, and manual-override transitions reset the dwell/evaluation/stability counters for later Policy changes.
+`Initial`, `ForcedRecovery`, and `ManualOverride` execute immediately without these gates and establish a dwell baseline. Policy, recovery, and manual-override transitions reset the dwell/evaluation/stability counters for later Policy changes. Releasing a forced group clears pending observations but preserves an existing baseline.
 
-The state is persisted in `route-state.json`. Existing installations without the new state fields may perform one normal migration switch; later automatic transitions use the full guard.
+The state is persisted in `route-state.json`. Existing installations whose old file has a current group but no `LastPolicySwitchAt` may perform one normal migration switch; that switch establishes the baseline, and later automatic transitions use the full guard.
 
 The same state file stores the optional forced `GroupId`. Once authenticated account data confirms that the group fails a hard eligibility rule, preview, simulation, or a real routing cycle clears the pin before normal recovery. Simulation still never writes a Key. This does not alter provider multipliers or measurements.
 
